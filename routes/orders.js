@@ -6,6 +6,12 @@ const orderController = require('../controllers/orderController');
 const { verifyToken, requireAdmin } = require('../middleware/authMiddleware');
 const { auditPriceChange } = require('../middleware/auditMiddleware');
 
+// PUBLIC — GUEST CHECKOUT (no auth required)
+router.post(
+  '/guest-checkout',
+  orderController.guestCheckout
+);
+
 // PUBLIC CUSTOMER CHECKOUT
 router.post(
   '/',

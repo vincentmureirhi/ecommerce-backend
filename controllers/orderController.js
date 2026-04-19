@@ -20,6 +20,15 @@ function normalizeText(value) {
   return text || null;
 }
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function deriveRoutePaymentState(totalAmount, amountPaid, dueDate) {
   const total = toNumber(totalAmount, 0);
   const paid = Math.max(0, toNumber(amountPaid, 0));
@@ -285,6 +294,176 @@ const getOrderById = async (req, res) => {
   } catch (err) {
     console.error('getOrderById error:', err.message);
     return handleError(res, 500, 'Failed to retrieve order', err);
+  }
+};
+
+// GUEST CHECKOUT — public endpoint, no auth required
+const guestCheckout = async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const {
+      customer_name,
+      customer_phone,
+      customer_email,
+      delivery_address,
+      notes,
+      items,
+    } = req.body;
+
+    const normalizedName = normalizeText(customer_name);
+    const normalizedPhone = normalizeText(customer_phone);
+    const normalizedEmail = normalizeText(customer_email);
+    const normalizedAddress = normalizeText(delivery_address);
+    const normalizedNotes = normalizeText(notes);
+
+    if (!normalizedName) {
+      return handleError(res, 400, 'customer_name is required');
+    }
+    if (!normalizedPhone) {
+      return handleError(res, 400, 'customer_phone is required');
+    }
+    if (!Array.isArray(items) || items.length === 0) {
+      return handleError(res, 400, 'At least one order item is required');
+    }
+
+    await client.query('BEGIN');
+
+    // Find or create a buying customer record (customer_type = 'normal')
+    let customerId;
+    const existingCustomer = await client.query(
+      `SELECT id FROM customers
+       WHERE phone = $1 AND customer_type = 'normal'
+       LIMIT 1`,
+      [normalizedPhone]
+    );
+
+    if (existingCustomer.rows.length > 0) {
+      customerId = existingCustomer.rows[0].id;
+      // Update name/email/address if provided
+      await client.query(
+        `UPDATE customers
+         SET name = $1,
+             email = COALESCE($2, email),
+             address = COALESCE($3, address),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $4`,
+        [normalizedName, normalizedEmail, normalizedAddress, customerId]
+      );
+    } else {
+      const newCustomer = await client.query(
+        `INSERT INTO customers
+         (name, phone, email, address, customer_type, is_active, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, 'normal', TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         RETURNING id`,
+        [normalizedName, normalizedPhone, normalizedEmail, normalizedAddress]
+      );
+      customerId = newCustomer.rows[0].id;
+    }
+
+    // Validate and prepare order items
+    const preparedItems = [];
+    let computedTotalAmount = 0;
+
+    for (const rawItem of items) {
+      const productId = Number(rawItem.product_id);
+      const quantity = Number(rawItem.quantity || 0);
+
+      if (!Number.isInteger(productId) || productId <= 0) {
+        throw new Error('Invalid product_id in order items');
+      }
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        throw new Error(`Invalid quantity for product ${productId}`);
+      }
+
+      const product = await fetchValidatedProduct(client, productId);
+
+      let priceAtPurchase = rawItem.unit_price ?? rawItem.price_at_purchase ?? null;
+      if (priceAtPurchase === null || priceAtPurchase === undefined || priceAtPurchase === '') {
+        priceAtPurchase = product.retail_price;
+      }
+      priceAtPurchase = toNumber(priceAtPurchase, NaN);
+
+      if (!Number.isFinite(priceAtPurchase) || priceAtPurchase < 0) {
+        throw new Error(`Invalid price for product ${productId}`);
+      }
+
+      const lineTotal = roundMoney(quantity * priceAtPurchase);
+      computedTotalAmount += lineTotal;
+
+      preparedItems.push({
+        product_id: productId,
+        quantity,
+        price_at_purchase: roundMoney(priceAtPurchase),
+        line_total: lineTotal,
+        product_name: product.name,
+      });
+    }
+
+    computedTotalAmount = roundMoney(computedTotalAmount);
+    const orderNum = generateOrderNumber();
+
+    const orderResult = await client.query(
+      `
+      INSERT INTO orders
+      (
+        order_number,
+        order_type,
+        customer_id,
+        customer_name,
+        customer_phone,
+        customer_email,
+        delivery_address,
+        total_amount,
+        amount_paid,
+        notes,
+        payment_status,
+        payment_state,
+        is_printed
+      )
+      VALUES ($1, 'normal', $2, $3, $4, $5, $6, $7, 0, $8, 'pending', 'unpaid', FALSE)
+      RETURNING *
+      `,
+      [
+        orderNum,
+        customerId,
+        normalizedName,
+        normalizedPhone,
+        normalizedEmail,
+        normalizedAddress,
+        computedTotalAmount,
+        normalizedNotes,
+      ]
+    );
+
+    const orderId = orderResult.rows[0].id;
+
+    for (const item of preparedItems) {
+      await client.query(
+        `
+        INSERT INTO order_items (order_id, product_id, quantity, price_at_purchase, line_total)
+        VALUES ($1, $2, $3, $4, $5)
+        `,
+        [orderId, item.product_id, item.quantity, item.price_at_purchase, item.line_total]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    const createdOrder = enrichOrder(orderResult.rows[0]);
+    createdOrder.items = preparedItems.map((item) => ({
+      ...item,
+      unit_price: item.price_at_purchase,
+      total_price: item.line_total,
+    }));
+
+    return handleSuccess(res, 201, 'Order placed successfully', createdOrder);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('guestCheckout error:', err.message);
+    return handleError(res, 500, 'Failed to place order', err);
+  } finally {
+    client.release();
   }
 };
 
@@ -670,6 +849,7 @@ const getOrderForPrint = async (req, res) => {
 
   try {
     const { id } = req.params;
+    const format = String(req.query.format || '').trim().toLowerCase();
 
     await client.query('BEGIN');
 
@@ -763,7 +943,7 @@ const getOrderForPrint = async (req, res) => {
     const itemsHtml = items.length
       ? items
           .map((item, index) => {
-            const productName = item.product_name || 'Unnamed Product';
+            const productName = escapeHtml(item.product_name || 'Unnamed Product');
             const qty = Number(item.quantity || 0);
             const unitPrice = Number(item.unit_price || 0);
             const lineTotal = Number(item.total_price || 0);
@@ -781,7 +961,7 @@ const getOrderForPrint = async (req, res) => {
                   <div class="item-meta-right">KES ${lineTotal.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
                 </div>
 
-                ${item.sku ? `<div class="item-sku">SKU: ${item.sku}</div>` : ''}
+                ${item.sku ? `<div class="item-sku">SKU: ${escapeHtml(item.sku)}</div>` : ''}
               </div>
             `;
           })
@@ -797,7 +977,7 @@ const getOrderForPrint = async (req, res) => {
       <html>
       <head>
         <meta charset="UTF-8" />
-        <title>Order Sheet ${order.order_number}</title>
+        <title>Order Sheet ${escapeHtml(order.order_number)}</title>
         <style>
           * {
             box-sizing: border-box;
@@ -983,8 +1163,8 @@ const getOrderForPrint = async (req, res) => {
       <body>
         <div class="sheet">
           <div class="center">
-            <div class="title">ORDER SHEET</div>
-            <div class="sub">80mm Print Format</div>
+            <div class="title">XPOSE DISTRIBUTORS</div>
+            <div class="sub">ORDER RECEIPT</div>
           </div>
 
           <div class="line"></div>
@@ -992,7 +1172,7 @@ const getOrderForPrint = async (req, res) => {
           <div class="section-title">Order Info</div>
           <div class="meta-row">
             <div class="meta-label">Order No</div>
-            <div class="meta-value">${order.order_number}</div>
+            <div class="meta-value">${escapeHtml(order.order_number)}</div>
           </div>
           <div class="meta-row">
             <div class="meta-label">Date</div>
@@ -1020,11 +1200,11 @@ const getOrderForPrint = async (req, res) => {
           <div class="section-title">Sales Rep</div>
           <div class="meta-row">
             <div class="meta-label">Name</div>
-            <div class="meta-value">${order.sales_rep_name || 'Unassigned'}</div>
+            <div class="meta-value">${escapeHtml(order.sales_rep_name || 'Unassigned')}</div>
           </div>
           <div class="meta-row">
             <div class="meta-label">Phone</div>
-            <div class="meta-value">${order.sales_rep_phone || '-'}</div>
+            <div class="meta-value">${escapeHtml(order.sales_rep_phone || '-')}</div>
           </div>
 
           <div class="line"></div>
@@ -1032,23 +1212,33 @@ const getOrderForPrint = async (req, res) => {
           <div class="section-title">Customer</div>
           <div class="meta-row">
             <div class="meta-label">Name</div>
-            <div class="meta-value">${order.customer_name}</div>
+            <div class="meta-value">${escapeHtml(order.customer_name)}</div>
           </div>
           <div class="meta-row">
             <div class="meta-label">Phone</div>
-            <div class="meta-value">${order.customer_phone}</div>
+            <div class="meta-value">${escapeHtml(order.customer_phone)}</div>
           </div>
+          ${order.customer_email ? `
+          <div class="meta-row">
+            <div class="meta-label">Email</div>
+            <div class="meta-value">${escapeHtml(order.customer_email)}</div>
+          </div>` : ''}
+          ${order.delivery_address ? `
+          <div class="meta-row">
+            <div class="meta-label">Address</div>
+            <div class="meta-value">${escapeHtml(order.delivery_address)}</div>
+          </div>` : `
           <div class="meta-row">
             <div class="meta-label">Location</div>
-            <div class="meta-value">${order.location_name || '-'}</div>
+            <div class="meta-value">${escapeHtml(order.location_name || '-')}</div>
           </div>
           <div class="meta-row">
             <div class="meta-label">Region</div>
-            <div class="meta-value">${order.region_name || '-'}</div>
-          </div>
+            <div class="meta-value">${escapeHtml(order.region_name || '-')}</div>
+          </div>`}
           <div class="meta-row">
             <div class="meta-label">Settlement</div>
-            <div class="meta-value">${settlementText}</div>
+            <div class="meta-value">${escapeHtml(settlementText)}</div>
           </div>
           <div class="meta-row">
             <div class="meta-label">Paid</div>
@@ -1060,7 +1250,7 @@ const getOrderForPrint = async (req, res) => {
           </div>
           <div class="meta-row">
             <div class="meta-label">Due Date</div>
-            <div class="meta-value">${order.due_date || '-'}</div>
+            <div class="meta-value">${escapeHtml(order.due_date || '-')}</div>
           </div>
 
           <div class="line"></div>
@@ -1094,7 +1284,7 @@ const getOrderForPrint = async (req, res) => {
               ? `
             <div class="line"></div>
             <div class="section-title">Notes</div>
-            <div class="note">${order.notes}</div>
+            <div class="note">${escapeHtml(order.notes)}</div>
           `
               : ''
           }
@@ -1102,7 +1292,8 @@ const getOrderForPrint = async (req, res) => {
           <div class="line"></div>
 
           <div class="footer">
-            <div>Printed from Admin Order Desk</div>
+            <div>Thank you for shopping with us!</div>
+            <div>XPOSE DISTRIBUTORS</div>
             <div>${new Date().toLocaleString('en-US', {
               year: 'numeric',
               month: '2-digit',
@@ -1119,6 +1310,11 @@ const getOrderForPrint = async (req, res) => {
       </body>
       </html>
     `;
+
+    if (format === 'html') {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      return res.status(200).send(receiptHtml);
+    }
 
     return handleSuccess(res, 200, 'Order print sheet retrieved successfully', {
       html: receiptHtml,
@@ -1264,6 +1460,7 @@ const trackPublicOrder = async (req, res) => {
 module.exports = {
   getAllOrders,
   getOrderById,
+  guestCheckout,
   createOrder,
   updateOrderStatus,
   getOrdersBySalesRep,
