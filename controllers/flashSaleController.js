@@ -128,7 +128,7 @@ const updateFlashSale = async (req, res) => {
       is_active,
     } = req.body;
 
-    const existing = await pool.query('SELECT id FROM flash_sales WHERE id = $1', [id]);
+    const existing = await pool.query('SELECT id, discount_type, discount_value FROM flash_sales WHERE id = $1', [id]);
     if (existing.rows.length === 0) {
       return handleError(res, 404, 'Flash sale not found');
     }
@@ -186,6 +186,18 @@ const updateFlashSale = async (req, res) => {
       return handleError(res, 400, 'No fields provided to update');
     }
 
+    // Validate the final combined discount_type + discount_value
+    const finalDiscountType = req.body.discount_type !== undefined
+      ? String(req.body.discount_type).trim().toLowerCase()
+      : existing.rows[0].discount_type;
+    const finalDiscountValue = req.body.discount_value !== undefined
+      ? Number(req.body.discount_value)
+      : Number(existing.rows[0].discount_value);
+
+    if (finalDiscountType === 'percentage' && finalDiscountValue > 100) {
+      return handleError(res, 400, 'Percentage discount cannot exceed 100');
+    }
+
     updates.push(`updated_at = NOW()`);
     params.push(id);
 
@@ -237,24 +249,43 @@ const addProductsToFlashSale = async (req, res) => {
       return handleError(res, 404, 'Flash sale not found');
     }
 
-    const inserted = [];
-    for (const productId of product_ids) {
-      const pid = Number(productId);
-      if (!Number.isInteger(pid) || pid <= 0) continue;
+    // Filter valid integer product IDs
+    const validIds = [...new Set(
+      product_ids.map((pid) => Number(pid)).filter((n) => Number.isInteger(n) && n > 0)
+    )];
 
-      const productCheck = await pool.query('SELECT id FROM products WHERE id = $1', [pid]);
-      if (productCheck.rows.length === 0) continue;
-
-      await pool.query(
-        `INSERT INTO flash_sale_products (flash_sale_id, product_id)
-         VALUES ($1, $2)
-         ON CONFLICT (flash_sale_id, product_id) DO NOTHING`,
-        [id, pid]
-      );
-      inserted.push(pid);
+    if (validIds.length === 0) {
+      return handleError(res, 400, 'No valid product IDs provided');
     }
 
-    return handleSuccess(res, 200, 'Products added to flash sale', { inserted });
+    // Batch validate all products exist in one query
+    const placeholders = validIds.map((_, i) => `$${i + 1}`).join(', ');
+    const existingProducts = await pool.query(
+      `SELECT id FROM products WHERE id IN (${placeholders})`,
+      validIds
+    );
+    const existingProductIds = new Set(existingProducts.rows.map((r) => r.id));
+    const insertableIds = validIds.filter((pid) => existingProductIds.has(pid));
+
+    if (insertableIds.length === 0) {
+      return handleSuccess(res, 200, 'No valid products found to add', { inserted: [] });
+    }
+
+    // Batch insert using a single multi-value INSERT
+    const valueParams = [];
+    const valuePlaceholders = insertableIds.map((pid, i) => {
+      valueParams.push(id, pid);
+      return `($${i * 2 + 1}, $${i * 2 + 2})`;
+    });
+
+    await pool.query(
+      `INSERT INTO flash_sale_products (flash_sale_id, product_id)
+       VALUES ${valuePlaceholders.join(', ')}
+       ON CONFLICT (flash_sale_id, product_id) DO NOTHING`,
+      valueParams
+    );
+
+    return handleSuccess(res, 200, 'Products added to flash sale', { inserted: insertableIds });
   } catch (err) {
     console.error('addProductsToFlashSale error:', err.message);
     return handleError(res, 500, 'Failed to add products to flash sale', err);

@@ -20,6 +20,15 @@ function normalizeText(value) {
   return text || null;
 }
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function deriveRoutePaymentState(totalAmount, amountPaid, dueDate) {
   const total = toNumber(totalAmount, 0);
   const paid = Math.max(0, toNumber(amountPaid, 0));
@@ -934,7 +943,7 @@ const getOrderForPrint = async (req, res) => {
     const itemsHtml = items.length
       ? items
           .map((item, index) => {
-            const productName = item.product_name || 'Unnamed Product';
+            const productName = escapeHtml(item.product_name || 'Unnamed Product');
             const qty = Number(item.quantity || 0);
             const unitPrice = Number(item.unit_price || 0);
             const lineTotal = Number(item.total_price || 0);
@@ -952,7 +961,7 @@ const getOrderForPrint = async (req, res) => {
                   <div class="item-meta-right">KES ${lineTotal.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
                 </div>
 
-                ${item.sku ? `<div class="item-sku">SKU: ${item.sku}</div>` : ''}
+                ${item.sku ? `<div class="item-sku">SKU: ${escapeHtml(item.sku)}</div>` : ''}
               </div>
             `;
           })
@@ -968,7 +977,7 @@ const getOrderForPrint = async (req, res) => {
       <html>
       <head>
         <meta charset="UTF-8" />
-        <title>Order Sheet ${order.order_number}</title>
+        <title>Order Sheet ${escapeHtml(order.order_number)}</title>
         <style>
           * {
             box-sizing: border-box;
@@ -1163,7 +1172,7 @@ const getOrderForPrint = async (req, res) => {
           <div class="section-title">Order Info</div>
           <div class="meta-row">
             <div class="meta-label">Order No</div>
-            <div class="meta-value">${order.order_number}</div>
+            <div class="meta-value">${escapeHtml(order.order_number)}</div>
           </div>
           <div class="meta-row">
             <div class="meta-label">Date</div>
@@ -1191,11 +1200,11 @@ const getOrderForPrint = async (req, res) => {
           <div class="section-title">Sales Rep</div>
           <div class="meta-row">
             <div class="meta-label">Name</div>
-            <div class="meta-value">${order.sales_rep_name || 'Unassigned'}</div>
+            <div class="meta-value">${escapeHtml(order.sales_rep_name || 'Unassigned')}</div>
           </div>
           <div class="meta-row">
             <div class="meta-label">Phone</div>
-            <div class="meta-value">${order.sales_rep_phone || '-'}</div>
+            <div class="meta-value">${escapeHtml(order.sales_rep_phone || '-')}</div>
           </div>
 
           <div class="line"></div>
@@ -1203,33 +1212,33 @@ const getOrderForPrint = async (req, res) => {
           <div class="section-title">Customer</div>
           <div class="meta-row">
             <div class="meta-label">Name</div>
-            <div class="meta-value">${order.customer_name}</div>
+            <div class="meta-value">${escapeHtml(order.customer_name)}</div>
           </div>
           <div class="meta-row">
             <div class="meta-label">Phone</div>
-            <div class="meta-value">${order.customer_phone}</div>
+            <div class="meta-value">${escapeHtml(order.customer_phone)}</div>
           </div>
           ${order.customer_email ? `
           <div class="meta-row">
             <div class="meta-label">Email</div>
-            <div class="meta-value">${order.customer_email}</div>
+            <div class="meta-value">${escapeHtml(order.customer_email)}</div>
           </div>` : ''}
           ${order.delivery_address ? `
           <div class="meta-row">
             <div class="meta-label">Address</div>
-            <div class="meta-value">${order.delivery_address}</div>
+            <div class="meta-value">${escapeHtml(order.delivery_address)}</div>
           </div>` : `
           <div class="meta-row">
             <div class="meta-label">Location</div>
-            <div class="meta-value">${order.location_name || '-'}</div>
+            <div class="meta-value">${escapeHtml(order.location_name || '-')}</div>
           </div>
           <div class="meta-row">
             <div class="meta-label">Region</div>
-            <div class="meta-value">${order.region_name || '-'}</div>
+            <div class="meta-value">${escapeHtml(order.region_name || '-')}</div>
           </div>`}
           <div class="meta-row">
             <div class="meta-label">Settlement</div>
-            <div class="meta-value">${settlementText}</div>
+            <div class="meta-value">${escapeHtml(settlementText)}</div>
           </div>
           <div class="meta-row">
             <div class="meta-label">Paid</div>
@@ -1241,7 +1250,7 @@ const getOrderForPrint = async (req, res) => {
           </div>
           <div class="meta-row">
             <div class="meta-label">Due Date</div>
-            <div class="meta-value">${order.due_date || '-'}</div>
+            <div class="meta-value">${escapeHtml(order.due_date || '-')}</div>
           </div>
 
           <div class="line"></div>
@@ -1275,7 +1284,7 @@ const getOrderForPrint = async (req, res) => {
               ? `
             <div class="line"></div>
             <div class="section-title">Notes</div>
-            <div class="note">${order.notes}</div>
+            <div class="note">${escapeHtml(order.notes)}</div>
           `
               : ''
           }

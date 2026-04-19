@@ -6,10 +6,13 @@ const { handleError, handleSuccess } = require('../utils/errorHandler');
 
 const VALID_ROLES = ['superuser', 'admin', 'staff'];
 
+// Build a parameterized IN clause from the VALID_ROLES constant
+const ROLES_PLACEHOLDER = VALID_ROLES.map((_, i) => `$${i + 1}`).join(', ');
+
 const getAdminUsers = async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT
+    const result = await pool.query(
+      `SELECT
         id,
         email,
         COALESCE(first_name || ' ' || last_name, email) AS name,
@@ -20,9 +23,10 @@ const getAdminUsers = async (req, res) => {
         created_at,
         updated_at
       FROM users
-      WHERE role IN ('admin', 'superuser', 'staff')
-      ORDER BY created_at DESC
-    `);
+      WHERE role IN (${ROLES_PLACEHOLDER})
+      ORDER BY created_at DESC`,
+      VALID_ROLES
+    );
 
     return handleSuccess(res, 200, 'Admin users retrieved successfully', result.rows);
   } catch (err) {
@@ -34,7 +38,7 @@ const getAdminUsers = async (req, res) => {
 const createAdminUser = async (req, res) => {
   try {
     if (req.user.role !== 'superuser') {
-      return handleError(res, 403, 'Only superadmin can create admin users');
+      return handleError(res, 403, 'Only superuser can create admin users');
     }
 
     const { email, first_name, last_name, password, role } = req.body;
@@ -76,15 +80,15 @@ const createAdminUser = async (req, res) => {
 const updateAdminUser = async (req, res) => {
   try {
     if (req.user.role !== 'superuser') {
-      return handleError(res, 403, 'Only superadmin can update admin users');
+      return handleError(res, 403, 'Only superuser can update admin users');
     }
 
     const { id } = req.params;
     const { first_name, last_name, email, is_active, password } = req.body;
 
     const existing = await pool.query(
-      'SELECT id, role FROM users WHERE id = $1 AND role IN (\'admin\', \'superuser\', \'staff\')',
-      [id]
+      'SELECT id, role FROM users WHERE id = $1 AND role = ANY($2)',
+      [id, VALID_ROLES]
     );
     if (existing.rows.length === 0) {
       return handleError(res, 404, 'Admin user not found');
@@ -147,7 +151,7 @@ const updateAdminUser = async (req, res) => {
 const deleteAdminUser = async (req, res) => {
   try {
     if (req.user.role !== 'superuser') {
-      return handleError(res, 403, 'Only superadmin can delete admin users');
+      return handleError(res, 403, 'Only superuser can delete admin users');
     }
 
     const { id } = req.params;
@@ -157,8 +161,8 @@ const deleteAdminUser = async (req, res) => {
     }
 
     const existing = await pool.query(
-      'SELECT id, role, email FROM users WHERE id = $1 AND role IN (\'admin\', \'superuser\', \'staff\')',
-      [id]
+      'SELECT id, role, email FROM users WHERE id = $1 AND role = ANY($2)',
+      [id, VALID_ROLES]
     );
     if (existing.rows.length === 0) {
       return handleError(res, 404, 'Admin user not found');
@@ -184,7 +188,7 @@ const deleteAdminUser = async (req, res) => {
 const updateAdminUserRole = async (req, res) => {
   try {
     if (req.user.role !== 'superuser') {
-      return handleError(res, 403, 'Only superadmin can change user roles');
+      return handleError(res, 403, 'Only superuser can change user roles');
     }
 
     const { id } = req.params;
@@ -200,8 +204,8 @@ const updateAdminUserRole = async (req, res) => {
     }
 
     const existing = await pool.query(
-      'SELECT id, role FROM users WHERE id = $1 AND role IN (\'admin\', \'superuser\', \'staff\')',
-      [id]
+      'SELECT id, role FROM users WHERE id = $1 AND role = ANY($2)',
+      [id, VALID_ROLES]
     );
     if (existing.rows.length === 0) {
       return handleError(res, 404, 'Admin user not found');
