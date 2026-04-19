@@ -1,0 +1,610 @@
+### ===== HEALTH CHECK =====
+GET http://localhost:5000/api/health
+
+### ===== AUTHENTICATION =====
+
+### Register as Admin
+POST http://localhost:5000/api/auth/register
+Content-Type: application/json
+
+{
+  "email": "admin@ecommerce.com",
+  "password": "Admin123",
+  "first_name": "Admin",
+  "last_name": "User",
+  "role": "admin",
+  "phone_number": "0712345678"
+}
+
+### Register as Sales Rep
+POST http://localhost:5000/api/auth/register
+Content-Type: application/json
+
+{
+  "email": "salesrep@ecommerce.com",
+  "password": "Rep123",
+  "first_name": "John",
+  "last_name": "Salesman",
+  "role": "sales_rep",
+  "phone_number": "0787654321"
+}
+
+### Login Admin
+POST http://localhost:5000/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "admin@ecommerce.com",
+  "password": "Admin123"
+}
+
+### Login Sales Rep
+POST http://localhost:5000/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "salesrep@ecommerce.com",
+  "password": "Rep123"
+}
+
+### ===== CUSTOMER LOCATIONS =====
+
+### Get All Locations
+GET http://localhost:5000/api/customer-locations
+
+### Create Location (Admin Only)
+POST http://localhost:5000/api/customer-locations
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+{
+  "name": "Nairobi City Center",
+  "description": "Downtown Nairobi"
+}
+
+### Create Another Location
+POST http://localhost:5000/api/customer-locations
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+{
+  "name": "Westlands",
+  "description": "Westlands area"
+}
+
+### Create Third Location
+POST http://localhost:5000/api/customer-locations
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+{
+  "name": "Mombasa",
+  "description": "Mombasa area"
+}
+
+### ===== CATEGORIES =====
+
+### Get All Categories
+GET http://localhost:5000/api/categories
+
+### Create Category 1 (Admin Only)
+POST http://localhost:5000/api/categories
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+{
+  "name": "Electronics",
+  "description": "Electronic devices and gadgets"
+}
+
+### Create Category 2 (Admin Only)
+POST http://localhost:5000/api/categories
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+{
+  "name": "Clothing",
+  "description": "Men and women apparel"
+}
+
+### Create Category 3 (Admin Only)
+POST http://localhost:5000/api/categories
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+{
+  "name": "Food & Beverages",
+  "description": "Food and drink items"
+}
+
+### ===== PRODUCTS =====
+
+### Get All Products
+GET http://localhost:5000/api/products
+
+### Create Product 1 (Admin Only)
+POST http://localhost:5000/api/products
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+{
+  "name": "Laptop Computer",
+  "description": "High performance laptop",
+  "category_id": 1,
+  "sku": "LAP001",
+  "image_path": "/uploads/products/laptop.jpg",
+  "retail_price": 50000.00,
+  "wholesale_price": 45000.00,
+  "min_stock": 5
+}
+
+### Create Product 2 (Admin Only)
+POST http://localhost:5000/api/products
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+{
+  "name": "USB-C Cable",
+  "description": "Fast charging cable",
+  "category_id": 1,
+  "sku": "USB001",
+  "image_path": "/uploads/products/cable.jpg",
+  "retail_price": 500.00,
+  "wholesale_price": 400.00,
+  "min_stock": 20
+}
+
+### Create Product 3 (Admin Only)
+POST http://localhost:5000/api/products
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+{
+  "name": "T-Shirt",
+  "description": "Cotton T-Shirt",
+  "category_id": 2,
+  "sku": "TSH001",
+  "image_path": "/uploads/products/tshirt.jpg",
+  "retail_price": 1000.00,
+  "wholesale_price": 800.00,
+  "min_stock": 30
+}
+
+### Get Out of Stock Products
+GET http://localhost:5000/api/products/stock/out-of-stock
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+### Get Low Stock Products
+GET http://localhost:5000/api/products/stock/low-stock
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+### ===== CUSTOMERS =====
+
+### Get All Customers
+GET http://localhost:5000/api/customers
+
+### Create Customer 1 (No Auth Required)
+POST http://localhost:5000/api/customers
+Content-Type: application/json
+
+{
+  "name": "James Kipchoge",
+  "phone_number": "+254712345678",
+  "location_id": 1
+}
+
+### Create Customer 2 (No Auth Required)
+POST http://localhost:5000/api/customers
+Content-Type: application/json
+
+{
+  "name": "Mary Wanjiru",
+  "phone_number": "+254787654321",
+  "location_id": 1
+}
+
+### ===== ORDERS (NORMAL CUSTOMER ORDER) =====
+
+### Create Normal Order (No Auth Required)
+POST http://localhost:5000/api/orders
+Content-Type: application/json
+
+{
+  "order_type": "normal",
+  "customer_name": "James Kipchoge",
+  "customer_phone": "+254712345678",
+  "customer_location_id": 1,
+  "items": [
+    {
+      "product_id": 1,
+      "quantity": 2
+    },
+    {
+      "product_id": 2,
+      "quantity": 5
+    }
+  ],
+  "notes": "Please deliver ASAP"
+}
+
+### ===== ORDERS (ROUTE ORDER - SALES REP) =====
+
+### Create Route Order (Sales Rep Order)
+POST http://localhost:5000/api/orders
+Content-Type: application/json
+
+{
+  "order_type": "route",
+  "customer_name": "Mary Wanjiru",
+  "customer_phone": "+254787654321",
+  "customer_location_id": 1,
+  "sales_rep_id": 2,
+  "items": [
+    {
+      "product_id": 3,
+      "quantity": 10
+    }
+  ],
+  "notes": "Sold by John Salesman"
+}
+
+### Get All Orders (Admin Only)
+GET http://localhost:5000/api/orders
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+### Get Orders by Type (Route Orders)
+GET http://localhost:5000/api/orders?order_type=route
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+### Get Single Order
+GET http://localhost:5000/api/orders/1
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+### Get Order for Print (80mm Thermal Printer)
+GET http://localhost:5000/api/orders/1/print
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+### Get Orders by Sales Rep
+GET http://localhost:5000/api/orders/sales-rep/2
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MiwiZW1haWwiOiJzYWxlc3JlcEBlY29tbWVyY2UuY29tIiwicm9sZSI6InNhbGVzX3JlcCIsImZpcnN0X25hbWUiOiJKb2huIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.xxxxxxxx
+
+### Get Order Statistics
+GET http://localhost:5000/api/orders/stats
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+### Update Order Status
+PUT http://localhost:5000/api/orders/1/status
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+{
+  "order_status": "completed",
+  "payment_status": "completed",
+  "notes": "Order delivered successfully"
+}
+
+### ===== PAYMENTS =====
+
+### Initiate Payment
+POST http://localhost:5000/api/payments
+Content-Type: application/json
+
+{
+  "order_id": 1,
+  "phone_number": "+254712345678",
+  "amount": 100500
+}
+
+### Get All Payments (Admin Only)
+GET http://localhost:5000/api/payments
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+### Get Payment by ID
+GET http://localhost:5000/api/payments/1
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+### Get Payment by Order ID
+GET http://localhost:5000/api/payments/order/1
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+### Get Payment Statistics
+GET http://localhost:5000/api/payments/stats
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+### Update Payment Status (Admin Only)
+PUT http://localhost:5000/api/payments/1/status
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+{
+  "status": "completed",
+  "mpesa_reference": "MPL2F0G0XO",
+  "notes": "M-Pesa payment confirmed"
+}
+
+### ===== USERS =====
+
+### Get All Users (Admin Only)
+GET http://localhost:5000/api/users
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+### Get All Sales Reps
+GET http://localhost:5000/api/users/sales-reps
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+### Get Single User by ID
+GET http://localhost:5000/api/users/1
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+### Health check
+GET http://localhost:5000/api/health
+
+### Test A - Wholesale (qty 12) => 60
+POST http://localhost:5000/api/orders
+Content-Type: application/json
+
+{
+  "order_type": "normal",
+  "customer_name": "Wholesale Test",
+  "customer_phone": "0712345678",
+  "items": [{ "product_id": 2, "quantity": 12 }],
+  "notes": "expect wholesale 60"
+}
+
+### Test B - Tier (qty 55) => 47
+POST http://localhost:5000/api/orders
+Content-Type: application/json
+
+{
+  "order_type": "normal",
+  "customer_name": "Tier Test",
+  "customer_phone": "0712345678",
+  "items": [{ "product_id": 2, "quantity": 55 }],
+  "notes": "expect tier 47"
+}
+
+### Test C - Combo (qty 6) => 80 (retail 100 capped to 80)
+POST http://localhost:5000/api/orders
+Content-Type: application/json
+
+{
+  "order_type": "normal",
+  "customer_name": "Combo Test",
+  "customer_phone": "0712345678",
+  "items": [{ "product_id": 2, "quantity": 6 }],
+  "notes": "expect combo cap 80"
+}
+
+### Test D - Manual pricing product should fail (product_id 3)
+POST http://localhost:5000/api/orders
+Content-Type: application/json
+
+{
+  "order_type": "normal",
+  "customer_name": "Manual Test",
+  "customer_phone": "0712345678",
+  "items": [{ "product_id": 3, "quantity": 1 }],
+  "notes": "should fail manual pricing"
+}
+
+### Tier test NEW (qty 55 should be 47)
+POST http://localhost:5000/api/orders
+Content-Type: application/json
+
+{
+  "order_type": "normal",
+  "customer_name": "Tier Test NEW",
+  "customer_phone": "0712345678",
+  "items": [
+    { "product_id": 2, "quantity": 55 }
+  ],
+  "notes": "expect tier 47"
+}
+
+### DB pricing tier test (must be 47)
+POST http://localhost:5000/api/orders
+Content-Type: application/json
+
+{
+  "order_type": "normal",
+  "customer_name": "TIER_DB_V1_TEST",
+  "customer_phone": "0712345678",
+  "items": [
+    { "product_id": 2, "quantity": 55 }
+  ],
+  "notes": "must be 47"
+}
+
+### Manual combo should NOT touch manual_price
+POST http://localhost:5000/api/orders
+Content-Type: application/json
+
+{
+  "order_type": "normal",
+  "customer_name": "MANUAL_COMBO_SHOULD_NOT_TOUCH",
+  "customer_phone": "0712345678",
+  "items": [
+    { "product_id": 3, "quantity": 6, "manual_unit_price": 2500 }
+  ],
+  "notes": "manual line must not be capped"
+}
+
+### Public should fail for manual product
+POST http://localhost:5000/api/orders
+Content-Type: application/json
+
+{
+  "order_type": "normal",
+  "customer_name": "PUBLIC_MANUAL_SHOULD_FAIL",
+  "customer_phone": "0712345678",
+  "items": [
+    { "product_id": 3, "quantity": 1, "manual_unit_price": 2500 }
+  ]
+}
+
+### Admin should pass for manual product
+POST http://localhost:5000/api/orders/admin
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+{
+  "order_type": "normal",
+  "customer_name": "ADMIN_MANUAL_SHOULD_PASS",
+  "customer_phone": "0712345678",
+  "items": [
+    { "product_id": 3, "quantity": 1, "manual_unit_price": 2500 }
+  ]
+}
+
+### C) Admin manual on NON-manual product MUST fail (product 2)
+POST http://localhost:5000/api/orders/admin
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+{
+  "order_type": "normal",
+  "customer_name": "ADMIN_MANUAL_ON_NORMAL_SHOULD_FAIL",
+  "customer_phone": "0712345678",
+  "items": [
+    { "product_id": 2, "quantity": 1, "manual_unit_price": 999 }
+  ]
+}
+
+### D) Admin manual missing price MUST fail
+POST http://localhost:5000/api/orders/admin
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+{
+  "order_type": "normal",
+  "customer_name": "ADMIN_MANUAL_MISSING_PRICE_SHOULD_FAIL",
+  "customer_phone": "0712345678",
+  "items": [
+    { "product_id": 3, "quantity": 2 }
+  ]
+}
+
+### E) Public manual product MUST fail
+POST http://localhost:5000/api/orders
+Content-Type: application/json
+
+{
+  "order_type": "normal",
+  "customer_name": "PUBLIC_MANUAL_PRODUCT_SHOULD_FAIL",
+  "customer_phone": "0712345678",
+  "items": [
+    { "product_id": 3, "quantity": 1 }
+  ]
+}
+
+### F) Admin manual product MUST pass
+POST http://localhost:5000/api/orders/admin
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+{
+  "order_type": "normal",
+  "customer_name": "ADMIN_MANUAL_PRODUCT_SHOULD_PASS",
+  "customer_phone": "0712345678",
+  "items": [
+    { "product_id": 3, "quantity": 6, "manual_unit_price": 2500 }
+  ]
+}
+
+### Tier must be 47
+POST http://localhost:5000/api/orders
+Content-Type: application/json
+
+{
+  "order_type": "normal",
+  "customer_name": "TIER_MUST_BE_47",
+  "customer_phone": "0712345678",
+  "items": [
+    { "product_id": 2, "quantity": 55 }
+  ],
+  "notes": "expect 47"
+}
+
+### Combo should cap to 80 (6 items)
+POST http://localhost:5000/api/orders
+Content-Type: application/json
+
+{
+  "order_type": "normal",
+  "customer_name": "COMBO_CAP_TO_80",
+  "customer_phone": "0712345678",
+  "items": [
+    { "product_id": 2, "quantity": 6 }
+  ],
+  "notes": "expect unit 80"
+}
+
+### Combo must NOT raise price (tier 47 should win)
+POST http://localhost:5000/api/orders
+Content-Type: application/json
+
+{
+  "order_type": "normal",
+  "customer_name": "COMBO_MUST_NOT_OVERRIDE_TIER",
+  "customer_phone": "0712345678",
+  "items": [
+    { "product_id": 2, "quantity": 55 }
+  ],
+  "notes": "must stay 47, not 80"
+}
+
+### Public MUST reject manual product
+POST http://localhost:5000/api/orders
+Content-Type: application/json
+
+{
+  "order_type": "normal",
+  "customer_name": "PUBLIC_MANUAL_MUST_FAIL",
+  "customer_phone": "0712345678",
+  "items": [
+    { "product_id": 3, "quantity": 1 }
+  ]
+}
+
+### Admin MUST require manual_unit_price for manual product
+POST http://localhost:5000/api/orders/admin
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+{
+  "order_type": "normal",
+  "customer_name": "ADMIN_MANUAL_MISSING_PRICE_MUST_FAIL",
+  "customer_phone": "0712345678",
+  "items": [
+    { "product_id": 3, "quantity": 2 }
+  ]
+}
+
+### Admin manual product SHOULD pass
+POST http://localhost:5000/api/orders/admin
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+{
+  "order_type": "normal",
+  "customer_name": "ADMIN_MANUAL_WITH_PRICE_SHOULD_PASS",
+  "customer_phone": "0712345678",
+  "items": [
+    { "product_id": 3, "quantity": 2, "manual_unit_price": 2500 }
+  ]
+}
+
+POST http://localhost:5000/api/payments
+Content-Type: application/json
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
+
+{
+  "order_id": 36,
+  "amount": 1000,
+  "payment_method": "cash",
+  "status": "completed",
+  "notes": "cash deposit"
+}
+
+GET http://localhost:5000/api/payments/summary?order_id=36
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiZW1haWwiOiJhZG1pbkBlY29tbWVyY2UuY29tIiwicm9sZSI6ImFkbWluIiwiZmlyc3RfbmFtZSI6IkFkbWluIiwiaWF0IjoxNzcxNjk3MTM3LCJleHAiOjE3NzQyODkxMzd9.In_QIhIOLql07inK8N6_WzzA8C_Is5E_1n75fPb4TW0
