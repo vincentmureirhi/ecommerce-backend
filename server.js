@@ -34,6 +34,7 @@ const suppliersRouter = require('./routes/suppliers');
 const uploadRoutes = require('./routes/uploads');
 const analyticsRoutes = require('./routes/analytics');
 const routeCustomerPortalRoutes = require('./routes/routeCustomerPortal');
+const flashSalesRoutes = require('./routes/flashSales');
 
 const app = express();
 
@@ -100,6 +101,7 @@ app.use('/api/suppliers', suppliersRouter);
 app.use('/api/uploads', uploadRoutes);
 app.use('/api/admin-users', adminUsersRoutes);
 app.use('/api/route-customer-portal', routeCustomerPortalRoutes);
+app.use('/api/flash-sales', flashSalesRoutes);
 
 // ===== 404 =====
 app.use((req, res) => {

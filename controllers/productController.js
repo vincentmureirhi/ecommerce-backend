@@ -30,10 +30,28 @@ const getAllProducts = async (req, res) => {
       SELECT
         p.*,
         c.name AS category_name,
-        d.name AS department_name
+        d.name AS department_name,
+        fs.id AS flash_sale_id,
+        fs.name AS flash_sale_name,
+        fs.discount_type,
+        fs.discount_value,
+        fs.end_date AS flash_sale_end_date,
+        CASE
+          WHEN fs.id IS NOT NULL AND fs.discount_type = 'percentage'
+            THEN ROUND(p.retail_price * (1 - fs.discount_value / 100), 2)
+          WHEN fs.id IS NOT NULL AND fs.discount_type = 'fixed'
+            THEN GREATEST(p.retail_price - fs.discount_value, 0)
+          ELSE NULL
+        END AS discounted_price
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN departments d ON d.id = p.department_id
+      LEFT JOIN flash_sale_products fsp ON fsp.product_id = p.id
+      LEFT JOIN flash_sales fs
+        ON fs.id = fsp.flash_sale_id
+       AND fs.is_active = TRUE
+       AND fs.start_date <= NOW()
+       AND fs.end_date >= NOW()
       ORDER BY p.id DESC
     `);
     return handleSuccess(res, 200, "Products retrieved", r.rows);
@@ -50,10 +68,28 @@ const getProductById = async (req, res) => {
       SELECT
         p.*,
         c.name AS category_name,
-        d.name AS department_name
+        d.name AS department_name,
+        fs.id AS flash_sale_id,
+        fs.name AS flash_sale_name,
+        fs.discount_type,
+        fs.discount_value,
+        fs.end_date AS flash_sale_end_date,
+        CASE
+          WHEN fs.id IS NOT NULL AND fs.discount_type = 'percentage'
+            THEN ROUND(p.retail_price * (1 - fs.discount_value / 100), 2)
+          WHEN fs.id IS NOT NULL AND fs.discount_type = 'fixed'
+            THEN GREATEST(p.retail_price - fs.discount_value, 0)
+          ELSE NULL
+        END AS discounted_price
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN departments d ON d.id = p.department_id
+      LEFT JOIN flash_sale_products fsp ON fsp.product_id = p.id
+      LEFT JOIN flash_sales fs
+        ON fs.id = fsp.flash_sale_id
+       AND fs.is_active = TRUE
+       AND fs.start_date <= NOW()
+       AND fs.end_date >= NOW()
       WHERE p.id = $1
       `,
       [id]
