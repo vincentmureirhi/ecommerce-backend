@@ -35,7 +35,7 @@ const uploadRoutes = require('./routes/uploads');
 const analyticsRoutes = require('./routes/analytics');
 const routeCustomerPortalRoutes = require('./routes/routeCustomerPortal');
 const flashSalesRoutes = require('./routes/flashSales');
-const flashSalesRoutes = require('./routes/flashSales');
+const blogRoutes = require('./routes/blog');
 
 const app = express();
 
@@ -103,7 +103,7 @@ app.use('/api/uploads', uploadRoutes);
 app.use('/api/admin-users', adminUsersRoutes);
 app.use('/api/route-customer-portal', routeCustomerPortalRoutes);
 app.use('/api/flash-sales', flashSalesRoutes);
-app.use('/api/flash-sales', flashSalesRoutes);
+app.use('/api/blog', blogRoutes);
 
 // ===== 404 =====
 app.use((req, res) => {
