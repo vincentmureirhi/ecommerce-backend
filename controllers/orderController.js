@@ -3,6 +3,7 @@
 const pool = require('../config/database');
 const { handleError, handleSuccess } = require('../utils/errorHandler');
 const generateOrderNumber = require('../utils/generateOrderNumber');
+const { evaluateCartPricing } = require('../utils/pricingRuleEvaluator');
 
 const VALID_ORDER_TYPES = new Set(['normal', 'route']);
 const VALID_ORDER_STATUSES = new Set(['pending', 'processing', 'dispatched', 'completed', 'cancelled']);
@@ -101,6 +102,67 @@ async function fetchValidatedProduct(client, productId) {
   }
 
   return result.rows[0];
+}
+
+/**
+ * Batch-fetch products with their active pricing rule and price tiers.
+ * Returns { productMap, tiersMap } keyed by product id.
+ */
+async function loadPricingContext(client, productIds) {
+  if (!productIds || productIds.length === 0) {
+    return { productMap: {}, tiersMap: {} };
+  }
+
+  const productResult = await client.query(
+    `
+    SELECT
+      p.id, p.name, p.sku,
+      p.retail_price, p.wholesale_price, p.min_qty_wholesale,
+      p.requires_manual_price, p.current_stock, p.pricing_rule_id,
+      pr.rule_type  AS pricing_rule_type,
+      pr.threshold_qty AS pricing_rule_threshold_qty,
+      pr.name       AS pricing_rule_name
+    FROM products p
+    LEFT JOIN pricing_rules pr
+      ON pr.id = p.pricing_rule_id AND pr.is_active = TRUE
+    WHERE p.id = ANY($1)
+    `,
+    [productIds]
+  );
+
+  const productMap = {};
+  for (const row of productResult.rows) {
+    productMap[row.id] = {
+      ...row,
+      _pricingRule:
+        row.pricing_rule_id != null
+          ? {
+              id: row.pricing_rule_id,
+              rule_type: row.pricing_rule_type,
+              threshold_qty: row.pricing_rule_threshold_qty,
+              name: row.pricing_rule_name,
+            }
+          : null,
+    };
+  }
+
+  const tiersResult = await client.query(
+    `
+    SELECT product_id, min_qty, max_qty, unit_price
+    FROM product_price_tiers
+    WHERE product_id = ANY($1)
+    ORDER BY product_id, min_qty
+    `,
+    [productIds]
+  );
+
+  const tiersMap = {};
+  for (const tier of tiersResult.rows) {
+    if (!tiersMap[tier.product_id]) tiersMap[tier.product_id] = [];
+    tiersMap[tier.product_id].push(tier);
+  }
+
+  return { productMap, tiersMap };
 }
 
 // GET ALL ORDERS
@@ -362,10 +424,8 @@ const guestCheckout = async (req, res) => {
       customerId = newCustomer.rows[0].id;
     }
 
-    // Validate and prepare order items
-    const preparedItems = [];
-    let computedTotalAmount = 0;
-
+    // Validate items and collect product IDs
+    const rawItems = [];
     for (const rawItem of items) {
       const productId = Number(rawItem.product_id);
       const quantity = Number(rawItem.quantity || 0);
@@ -377,26 +437,55 @@ const guestCheckout = async (req, res) => {
         throw new Error(`Invalid quantity for product ${productId}`);
       }
 
-      const product = await fetchValidatedProduct(client, productId);
+      rawItems.push({ product_id: productId, quantity });
+    }
 
-      let priceAtPurchase = rawItem.unit_price ?? rawItem.price_at_purchase ?? null;
-      if (priceAtPurchase === null || priceAtPurchase === undefined || priceAtPurchase === '') {
-        priceAtPurchase = product.retail_price;
+    // Batch-load products with pricing rule context and tiers
+    const productIds = rawItems.map((i) => i.product_id);
+    const { productMap, tiersMap } = await loadPricingContext(client, productIds);
+
+    for (const item of rawItems) {
+      if (!productMap[item.product_id]) {
+        throw new Error(`Product does not exist: ${item.product_id}`);
       }
-      priceAtPurchase = toNumber(priceAtPurchase, NaN);
+    }
 
-      if (!Number.isFinite(priceAtPurchase) || priceAtPurchase < 0) {
-        throw new Error(`Invalid price for product ${productId}`);
+    // Server-side price resolution via pricing rule evaluator
+    const evaluatedItems = evaluateCartPricing(rawItems, productMap, tiersMap);
+
+    const preparedItems = [];
+    let computedTotalAmount = 0;
+
+    for (let i = 0; i < rawItems.length; i++) {
+      const rawItem = rawItems[i];
+      const evalItem = evaluatedItems[i];
+      const product = productMap[rawItem.product_id];
+
+      let priceAtPurchase;
+      let priceSource;
+
+      if (product.requires_manual_price || evalItem.unit_price == null) {
+        // Guest checkout cannot supply manual prices; fall back to retail
+        const fallback = toNumber(product.retail_price, NaN);
+        if (!Number.isFinite(fallback) || fallback < 0) {
+          throw new Error(`No valid price available for product ${rawItem.product_id}`);
+        }
+        priceAtPurchase = fallback;
+        priceSource = 'retail';
+      } else {
+        priceAtPurchase = Number(evalItem.unit_price.toFixed(2));
+        priceSource = evalItem.price_source;
       }
 
-      const lineTotal = roundMoney(quantity * priceAtPurchase);
+      const lineTotal = roundMoney(rawItem.quantity * priceAtPurchase);
       computedTotalAmount += lineTotal;
 
       preparedItems.push({
-        product_id: productId,
-        quantity,
+        product_id: rawItem.product_id,
+        quantity: rawItem.quantity,
         price_at_purchase: roundMoney(priceAtPurchase),
         line_total: lineTotal,
+        price_source: priceSource,
         product_name: product.name,
       });
     }
@@ -442,10 +531,18 @@ const guestCheckout = async (req, res) => {
     for (const item of preparedItems) {
       await client.query(
         `
-        INSERT INTO order_items (order_id, product_id, quantity, price_at_purchase, line_total)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO order_items
+          (order_id, product_id, quantity, price_at_purchase, line_total, price_source)
+        VALUES ($1, $2, $3, $4, $5, $6)
         `,
-        [orderId, item.product_id, item.quantity, item.price_at_purchase, item.line_total]
+        [
+          orderId,
+          item.product_id,
+          item.quantity,
+          item.price_at_purchase,
+          item.line_total,
+          item.price_source,
+        ]
       );
     }
 
@@ -542,9 +639,8 @@ const createOrder = async (req, res) => {
 
     await client.query('BEGIN');
 
-    const preparedItems = [];
-    let computedTotalAmount = 0;
-
+    // Validate items and collect product IDs
+    const rawItems = [];
     for (const rawItem of items) {
       const productId = Number(rawItem.product_id);
       const quantity = Number(rawItem.quantity || 0);
@@ -552,36 +648,73 @@ const createOrder = async (req, res) => {
       if (!Number.isInteger(productId) || productId <= 0) {
         throw new Error('Invalid product_id in order items');
       }
-
       if (!Number.isFinite(quantity) || quantity <= 0) {
         throw new Error(`Invalid quantity for product ${productId}`);
       }
 
-      const product = await fetchValidatedProduct(client, productId);
+      rawItems.push({
+        product_id: productId,
+        quantity,
+        submitted_price: rawItem.unit_price ?? rawItem.price_at_purchase ?? null,
+      });
+    }
 
-      let priceAtPurchase = rawItem.unit_price ?? rawItem.price_at_purchase ?? null;
-      if (priceAtPurchase === null || priceAtPurchase === undefined || priceAtPurchase === '') {
-        priceAtPurchase = product.retail_price;
+    // Batch-load products with pricing rule context and tiers
+    const productIds = rawItems.map((i) => i.product_id);
+    const { productMap, tiersMap } = await loadPricingContext(client, productIds);
+
+    for (const item of rawItems) {
+      if (!productMap[item.product_id]) {
+        throw new Error(`Product does not exist: ${item.product_id}`);
+      }
+    }
+
+    // Server-side price resolution via pricing rule evaluator
+    const evaluatedItems = evaluateCartPricing(rawItems, productMap, tiersMap);
+
+    const preparedItems = [];
+    let computedTotalAmount = 0;
+
+    for (let i = 0; i < rawItems.length; i++) {
+      const rawItem = rawItems[i];
+      const evalItem = evaluatedItems[i];
+      const product = productMap[rawItem.product_id];
+
+      let priceAtPurchase;
+      let priceSource;
+
+      if (product.requires_manual_price) {
+        // Manual product: caller must supply the price
+        const submittedPrice = rawItem.submitted_price;
+        if (submittedPrice == null || submittedPrice === '') {
+          throw new Error(
+            `unit_price is required for manual product ${rawItem.product_id}`
+          );
+        }
+        priceAtPurchase = toNumber(submittedPrice, NaN);
+        if (!Number.isFinite(priceAtPurchase) || priceAtPurchase < 0) {
+          throw new Error(`Invalid price for product ${rawItem.product_id}`);
+        }
+        priceSource = 'manual_price';
+      } else {
+        if (evalItem.unit_price == null) {
+          throw new Error(
+            `No valid price available for product ${rawItem.product_id}`
+          );
+        }
+        priceAtPurchase = Number(evalItem.unit_price.toFixed(2));
+        priceSource = evalItem.price_source;
       }
 
-      priceAtPurchase = toNumber(priceAtPurchase, NaN);
-
-      if (!Number.isFinite(priceAtPurchase) || priceAtPurchase < 0) {
-        throw new Error(`Invalid price for product ${productId}`);
-      }
-
-      if ((product.retail_price === null || product.retail_price === undefined) && priceAtPurchase === null) {
-        throw new Error(`No valid price available for product ${productId}`);
-      }
-
-      const lineTotal = roundMoney(quantity * priceAtPurchase);
+      const lineTotal = roundMoney(rawItem.quantity * priceAtPurchase);
       computedTotalAmount += lineTotal;
 
       preparedItems.push({
-        product_id: productId,
-        quantity,
+        product_id: rawItem.product_id,
+        quantity: rawItem.quantity,
         price_at_purchase: roundMoney(priceAtPurchase),
         line_total: lineTotal,
+        price_source: priceSource,
         product_name: product.name,
       });
     }
@@ -662,9 +795,10 @@ const createOrder = async (req, res) => {
           product_id,
           quantity,
           price_at_purchase,
-          line_total
+          line_total,
+          price_source
         )
-        VALUES ($1, $2, $3, $4, $5)
+        VALUES ($1, $2, $3, $4, $5, $6)
         `,
         [
           orderId,
@@ -672,6 +806,7 @@ const createOrder = async (req, res) => {
           item.quantity,
           item.price_at_purchase,
           item.line_total,
+          item.price_source,
         ]
       );
     }
