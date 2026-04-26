@@ -5,6 +5,7 @@ const { handleError, handleSuccess } = require('../utils/errorHandler');
 const generateOrderNumber = require('../utils/generateOrderNumber');
 
 const VALID_ORDER_TYPES = new Set(['normal', 'route']);
+const VALID_ORDER_STATUSES = new Set(['pending', 'processing', 'dispatched', 'completed', 'cancelled']);
 
 function toNumber(value, fallback = 0) {
   const n = Number(value);
@@ -720,6 +721,19 @@ const updateOrderStatus = async (req, res) => {
     }
 
     const current = currentResult.rows[0];
+
+    // Validate order_status against allowed values before touching the DB
+    if (order_status !== undefined && order_status !== null && order_status !== '') {
+      const normalizedStatus = String(order_status).trim().toLowerCase();
+      if (!normalizedStatus || !VALID_ORDER_STATUSES.has(normalizedStatus)) {
+        return handleError(
+          res,
+          400,
+          `Invalid order_status '${order_status}'. Allowed values: ${[...VALID_ORDER_STATUSES].join(', ')}`
+        );
+      }
+    }
+
     const totalAmount = toNumber(current.total_amount, 0);
     const currentAmountPaid = toNumber(current.amount_paid, 0);
 
@@ -771,7 +785,11 @@ const updateOrderStatus = async (req, res) => {
           due_date = $5,
           last_payment_date = $6,
           notes = COALESCE($7, notes),
-          updated_at = CURRENT_TIMESTAMP
+          updated_at = CURRENT_TIMESTAMP,
+          status_changed_at = CASE
+            WHEN $1 IS NOT NULL AND $1 IS DISTINCT FROM order_status THEN CURRENT_TIMESTAMP
+            ELSE status_changed_at
+          END
       WHERE id = $8
       RETURNING *
       `,
