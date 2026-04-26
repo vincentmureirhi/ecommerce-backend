@@ -695,7 +695,7 @@ const createOrder = async (req, res) => {
         if (!Number.isFinite(priceAtPurchase) || priceAtPurchase < 0) {
           throw new Error(`Invalid price for product ${rawItem.product_id}`);
         }
-        priceSource = 'manual';
+        priceSource = 'manual_price';
       } else {
         if (evalItem.unit_price == null) {
           throw new Error(
