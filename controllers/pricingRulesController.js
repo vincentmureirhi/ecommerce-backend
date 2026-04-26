@@ -3,6 +3,8 @@
 const pool = require('../config/database');
 const { handleError, handleSuccess } = require('../utils/errorHandler');
 
+// Allowed rule types — must match the CHECK constraint in
+// migrations/20260426_pricing_rules.sql (pricing_rules.rule_type).
 const VALID_RULE_TYPES = new Set(['CONSTANT', 'SKU_THRESHOLD', 'GROUP_THRESHOLD', 'TIERED']);
 
 function normalizeText(value) {

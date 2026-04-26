@@ -22,6 +22,8 @@ BEGIN;
 CREATE TABLE IF NOT EXISTS pricing_rules (
   id            SERIAL       PRIMARY KEY,
   name          VARCHAR(150) NOT NULL,
+  -- Keep this CHECK constraint in sync with VALID_RULE_TYPES in
+  -- controllers/pricingRulesController.js when adding new rule types.
   rule_type     VARCHAR(20)  NOT NULL
                   CHECK (rule_type IN ('CONSTANT','SKU_THRESHOLD','GROUP_THRESHOLD','TIERED')),
   threshold_qty INTEGER      CHECK (threshold_qty IS NULL OR threshold_qty >= 1),
