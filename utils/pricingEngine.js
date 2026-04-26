@@ -94,9 +94,20 @@ function resolveProductUnitPrice(product, qty, tiers = []) {
 }
 
 /**
+ * @deprecated Category-based combo pricing is no longer the active pricing model.
+ *
+ * The `categories.combo_discount_qty` / `combo_discount_price` fields and this
+ * function are retained for backward compatibility only.  New products should use
+ * named `pricing_rules` (CONSTANT, SKU_THRESHOLD, GROUP_THRESHOLD, TIERED) instead.
+ * See `utils/pricingRuleEvaluator.js` and `docs/pricing-precedence.md`.
+ *
+ * Categories remain taxonomy/inventory-oriented entities.
+ * They are NOT the pricing engine.
+ *
+ * ── Original behaviour (preserved for legacy callers) ────────────────────────
  * Category combo discount (FIXED v5):
  * ONLY applies to LOW-VALUE products (price < 1000kes)
- * 
+ *
  * Only apply combo if:
  * 1. Category total qty >= combo_discount_qty
  * 2. Product unit price < 1000kes (low-value items only)

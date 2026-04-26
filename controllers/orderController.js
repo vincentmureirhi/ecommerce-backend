@@ -3,6 +3,7 @@
 const pool = require('../config/database');
 const { handleError, handleSuccess } = require('../utils/errorHandler');
 const generateOrderNumber = require('../utils/generateOrderNumber');
+const { evaluateCartPricing, loadPricingContext } = require('../utils/pricingRuleEvaluator');
 
 const VALID_ORDER_TYPES = new Set(['normal', 'route']);
 const VALID_ORDER_STATUSES = new Set(['pending', 'processing', 'dispatched', 'completed', 'cancelled']);
@@ -363,12 +364,11 @@ const guestCheckout = async (req, res) => {
     }
 
     // Validate and prepare order items
-    const preparedItems = [];
-    let computedTotalAmount = 0;
-
+    // ── Validate item shape ────────────────────────────────────────────
+    const rawItems = [];
     for (const rawItem of items) {
       const productId = Number(rawItem.product_id);
-      const quantity = Number(rawItem.quantity || 0);
+      const quantity  = Number(rawItem.quantity || 0);
 
       if (!Number.isInteger(productId) || productId <= 0) {
         throw new Error('Invalid product_id in order items');
@@ -376,28 +376,49 @@ const guestCheckout = async (req, res) => {
       if (!Number.isFinite(quantity) || quantity <= 0) {
         throw new Error(`Invalid quantity for product ${productId}`);
       }
+      rawItems.push({ product_id: productId, quantity });
+    }
 
-      const product = await fetchValidatedProduct(client, productId);
+    // ── Load products + pricing rules + tiers in batch ─────────────────
+    const productIds = rawItems.map((i) => i.product_id);
+    const { productMap, tiersMap } = await loadPricingContext(client, productIds);
 
-      let priceAtPurchase = rawItem.unit_price ?? rawItem.price_at_purchase ?? null;
-      if (priceAtPurchase === null || priceAtPurchase === undefined || priceAtPurchase === '') {
-        priceAtPurchase = product.retail_price;
+    for (const { product_id: pid } of rawItems) {
+      if (!productMap.has(pid)) {
+        throw new Error(`Product does not exist: ${pid}`);
       }
-      priceAtPurchase = toNumber(priceAtPurchase, NaN);
+      // Guest checkout does not support requires_manual_price products
+      if (productMap.get(pid).requires_manual_price) {
+        throw new Error(`Product ${pid} requires a manual price and cannot be ordered via guest checkout`);
+      }
+    }
 
-      if (!Number.isFinite(priceAtPurchase) || priceAtPurchase < 0) {
-        throw new Error(`Invalid price for product ${productId}`);
+    // ── Server-side pricing (backend is the authority) ──────────────────
+    // Submitted unit_price values from the client are intentionally ignored.
+    // All prices are computed by the evaluator to prevent price manipulation.
+    const pricedItems = evaluateCartPricing(rawItems, productMap, tiersMap);
+
+    const preparedItems = [];
+    let computedTotalAmount = 0;
+
+    for (const priced of pricedItems) {
+      if (priced.unit_price == null) {
+        throw new Error(`Could not determine price for product ${priced.product_id}`);
       }
 
-      const lineTotal = roundMoney(quantity * priceAtPurchase);
-      computedTotalAmount += lineTotal;
+      const priceAtPurchase = roundMoney(Number(priced.unit_price));
+      const lineTotal       = roundMoney(Number(priced.line_total));
+      computedTotalAmount  += lineTotal;
 
       preparedItems.push({
-        product_id: productId,
-        quantity,
-        price_at_purchase: roundMoney(priceAtPurchase),
-        line_total: lineTotal,
-        product_name: product.name,
+        product_id:      priced.product_id,
+        quantity:        priced.quantity,
+        price_at_purchase: priceAtPurchase,
+        line_total:        lineTotal,
+        price_source:      priced.price_source,
+        pricing_rule_id:   priced.pricing_rule_id,
+        rule_type:         priced.rule_type,
+        product_name:      productMap.get(priced.product_id).name,
       });
     }
 
@@ -442,10 +463,21 @@ const guestCheckout = async (req, res) => {
     for (const item of preparedItems) {
       await client.query(
         `
-        INSERT INTO order_items (order_id, product_id, quantity, price_at_purchase, line_total)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO order_items
+          (order_id, product_id, quantity, price_at_purchase, line_total,
+           price_source, pricing_rule_id, rule_type)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         `,
-        [orderId, item.product_id, item.quantity, item.price_at_purchase, item.line_total]
+        [
+          orderId,
+          item.product_id,
+          item.quantity,
+          item.price_at_purchase,
+          item.line_total,
+          item.price_source,
+          item.pricing_rule_id,
+          item.rule_type,
+        ]
       );
     }
 
@@ -542,47 +574,92 @@ const createOrder = async (req, res) => {
 
     await client.query('BEGIN');
 
-    const preparedItems = [];
-    let computedTotalAmount = 0;
-
+    // ── Validate item shape ────────────────────────────────────────────
+    const rawItems = [];
     for (const rawItem of items) {
       const productId = Number(rawItem.product_id);
-      const quantity = Number(rawItem.quantity || 0);
+      const quantity  = Number(rawItem.quantity || 0);
 
       if (!Number.isInteger(productId) || productId <= 0) {
         throw new Error('Invalid product_id in order items');
       }
-
       if (!Number.isFinite(quantity) || quantity <= 0) {
         throw new Error(`Invalid quantity for product ${productId}`);
       }
 
-      const product = await fetchValidatedProduct(client, productId);
+      rawItems.push({
+        product_id:     productId,
+        quantity,
+        // submitted_price only used for requires_manual_price products (admin)
+        submitted_price: rawItem.unit_price ?? rawItem.price_at_purchase ?? null,
+      });
+    }
 
-      let priceAtPurchase = rawItem.unit_price ?? rawItem.price_at_purchase ?? null;
-      if (priceAtPurchase === null || priceAtPurchase === undefined || priceAtPurchase === '') {
-        priceAtPurchase = product.retail_price;
+    // ── Load products + pricing rules + tiers in batch ─────────────────
+    const productIds = rawItems.map((i) => i.product_id);
+    const { productMap, tiersMap } = await loadPricingContext(client, productIds);
+
+    for (const { product_id: pid } of rawItems) {
+      if (!productMap.has(pid)) {
+        throw new Error(`Product does not exist: ${pid}`);
+      }
+    }
+
+    // ── Server-side pricing (backend is the authority) ──────────────────
+    // For requires_manual_price products, the admin-supplied submitted_price
+    // is used (price_source = 'manual_price').
+    // For all other products, pricing is computed by the evaluator and
+    // submitted unit_price values from the client are ignored.
+    const itemsForEval = rawItems.map((i) => ({
+      product_id: i.product_id,
+      quantity:   i.quantity,
+    }));
+    const pricedItems = evaluateCartPricing(itemsForEval, productMap, tiersMap);
+
+    const preparedItems = [];
+    let computedTotalAmount = 0;
+
+    for (let i = 0; i < pricedItems.length; i++) {
+      const priced   = pricedItems[i];
+      const rawItem  = rawItems[i];
+      const product  = productMap.get(priced.product_id);
+
+      let priceAtPurchase;
+      let lineTotal;
+      let priceSource    = priced.price_source;
+      const pricingRuleId = priced.pricing_rule_id;
+      const ruleType      = priced.rule_type;
+
+      if (priced.price_source === 'manual_price') {
+        // Admin-supplied price is required for these products
+        const manualPrice = toNumber(rawItem.submitted_price, NaN);
+        if (!Number.isFinite(manualPrice) || manualPrice < 0) {
+          throw new Error(
+            `Product ${priced.product_id} requires a manual price (unit_price must be a valid non-negative number)`
+          );
+        }
+        priceAtPurchase = roundMoney(manualPrice);
+        lineTotal       = roundMoney(manualPrice * priced.quantity);
+        priceSource     = 'manual_price';
+      } else {
+        if (priced.unit_price == null) {
+          throw new Error(`Could not determine price for product ${priced.product_id}`);
+        }
+        priceAtPurchase = roundMoney(Number(priced.unit_price));
+        lineTotal       = roundMoney(Number(priced.line_total));
       }
 
-      priceAtPurchase = toNumber(priceAtPurchase, NaN);
-
-      if (!Number.isFinite(priceAtPurchase) || priceAtPurchase < 0) {
-        throw new Error(`Invalid price for product ${productId}`);
-      }
-
-      if ((product.retail_price === null || product.retail_price === undefined) && priceAtPurchase === null) {
-        throw new Error(`No valid price available for product ${productId}`);
-      }
-
-      const lineTotal = roundMoney(quantity * priceAtPurchase);
       computedTotalAmount += lineTotal;
 
       preparedItems.push({
-        product_id: productId,
-        quantity,
-        price_at_purchase: roundMoney(priceAtPurchase),
-        line_total: lineTotal,
-        product_name: product.name,
+        product_id:      priced.product_id,
+        quantity:        priced.quantity,
+        price_at_purchase: priceAtPurchase,
+        line_total:        lineTotal,
+        price_source:      priceSource,
+        pricing_rule_id:   pricingRuleId,
+        rule_type:         ruleType,
+        product_name:      product.name,
       });
     }
 
@@ -662,9 +739,12 @@ const createOrder = async (req, res) => {
           product_id,
           quantity,
           price_at_purchase,
-          line_total
+          line_total,
+          price_source,
+          pricing_rule_id,
+          rule_type
         )
-        VALUES ($1, $2, $3, $4, $5)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         `,
         [
           orderId,
@@ -672,6 +752,9 @@ const createOrder = async (req, res) => {
           item.quantity,
           item.price_at_purchase,
           item.line_total,
+          item.price_source,
+          item.pricing_rule_id,
+          item.rule_type,
         ]
       );
     }
