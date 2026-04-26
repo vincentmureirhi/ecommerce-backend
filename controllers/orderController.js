@@ -1410,6 +1410,58 @@ const getOrderStatistics = async (req, res) => {
   }
 };
 
+// Derive a structured tracking stage and human-readable summary from order fields.
+// This is used only by the public tracking endpoint so customers can render a
+// clear progress journey without the storefront needing to contain business logic.
+function deriveTrackingStage(order) {
+  const status = order.order_status;
+  const paymentStatus = order.payment_status;
+  const paid = toNumber(order.amount_paid, 0);
+  const total = toNumber(order.total_amount, 0);
+  const fullyPaid = total > 0 && paid >= total;
+
+  if (status === 'cancelled') {
+    return {
+      current_tracking_stage: 'cancelled',
+      tracking_summary: 'This order has been cancelled.',
+    };
+  }
+
+  if (status === 'completed') {
+    return {
+      current_tracking_stage: 'completed',
+      tracking_summary: 'Your order has been delivered and completed. Thank you!',
+    };
+  }
+
+  if (status === 'dispatched') {
+    return {
+      current_tracking_stage: 'dispatched',
+      tracking_summary: 'Your order has been dispatched and is on its way to you.',
+    };
+  }
+
+  if (status === 'processing') {
+    return {
+      current_tracking_stage: 'processing',
+      tracking_summary: 'Your order is currently being processed and prepared for dispatch.',
+    };
+  }
+
+  // status === 'pending'
+  if (paymentStatus === 'completed' || fullyPaid) {
+    return {
+      current_tracking_stage: 'payment_confirmed',
+      tracking_summary: 'Payment confirmed. Your order has been received and is awaiting processing.',
+    };
+  }
+
+  return {
+    current_tracking_stage: 'order_received',
+    tracking_summary: 'Your order has been received and is awaiting payment confirmation.',
+  };
+}
+
 const trackPublicOrder = async (req, res) => {
   try {
     const orderNumber = String(req.query.order_number || '').trim();
@@ -1467,6 +1519,13 @@ const trackPublicOrder = async (req, res) => {
       unit_price: roundMoney(item.price_at_purchase),
       total_price: roundMoney(item.line_total),
     }));
+
+    // Attach structured tracking fields for customer-facing progress display.
+    // These supplement the raw order fields without removing any existing data.
+    const trackingStage = deriveTrackingStage(order);
+    order.current_status = order.order_status;
+    order.current_tracking_stage = trackingStage.current_tracking_stage;
+    order.tracking_summary = trackingStage.tracking_summary;
 
     return handleSuccess(res, 200, 'Order tracking retrieved successfully', order);
   } catch (err) {

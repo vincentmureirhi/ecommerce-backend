@@ -12,6 +12,7 @@ const pool = require('./config/database');
 // Import WebSocket
 const { initializeWebSocket } = require('./websocket');
 const { autoFailStalePendingPayments } = require('./jobs/paymentAutoFail');
+const { autoProgressOrders } = require('./jobs/orderProgressionJob');
 
 // ===== IMPORT ROUTES =====
 const authRoutes = require('./routes/auth');
@@ -140,6 +141,19 @@ setInterval(async () => {
 }, 60000);
 
 console.log('✅ Payment auto-fail job started (15-minute timeout)');
+
+// Auto-progress stale orders every 5 minutes
+// processing -> dispatched after 4 h without a manual status change
+// dispatched  -> completed  after 8 h without a manual status change
+setInterval(async () => {
+  try {
+    await autoProgressOrders();
+  } catch (err) {
+    console.error('❌ Order progression job error:', err.message);
+  }
+}, 5 * 60 * 1000);
+
+console.log('✅ Order auto-progression job started (4 h processing→dispatched, 8 h dispatched→completed)');
 
 // ===== START SERVER =====
 const PORT = process.env.PORT || 5000;
