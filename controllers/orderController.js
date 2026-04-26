@@ -3,6 +3,7 @@
 const pool = require('../config/database');
 const { handleError, handleSuccess } = require('../utils/errorHandler');
 const generateOrderNumber = require('../utils/generateOrderNumber');
+const { resolveProductUnitPrice } = require('../utils/pricingEngine');
 
 const VALID_ORDER_TYPES = new Set(['normal', 'route']);
 const VALID_ORDER_STATUSES = new Set(['pending', 'processing', 'dispatched', 'completed', 'cancelled']);
@@ -88,6 +89,7 @@ async function fetchValidatedProduct(client, productId) {
       sku,
       retail_price,
       wholesale_price,
+      min_qty_wholesale,
       requires_manual_price,
       current_stock
     FROM products
@@ -101,6 +103,86 @@ async function fetchValidatedProduct(client, productId) {
   }
 
   return result.rows[0];
+}
+
+async function fetchProductTiers(client, productId) {
+  const r = await client.query(
+    `SELECT min_qty, max_qty, unit_price
+     FROM product_price_tiers
+     WHERE product_id = $1
+     ORDER BY min_qty ASC`,
+    [productId]
+  );
+  return r.rows;
+}
+
+/**
+ * Compute authoritative price for one order line item.
+ *
+ * For non-manual products: ignores any client-submitted price and resolves
+ * the price server-side using the tier/wholesale/retail fallback chain.
+ *
+ * For requires_manual_price products: uses submittedPrice (admin-supplied).
+ * If submittedPrice is absent, throws an explicit error.
+ *
+ * Returns { price_at_purchase, line_total, price_source }
+ */
+async function computeItemPricing(client, product, quantity, submittedPrice) {
+  if (product.requires_manual_price) {
+    const manualPrice = toNumber(submittedPrice, NaN);
+    if (!Number.isFinite(manualPrice) || manualPrice < 0) {
+      throw new Error(
+        `Product "${product.name}" requires manual pricing; provide a valid unit_price`
+      );
+    }
+    const price = roundMoney(manualPrice);
+    return {
+      price_at_purchase: price,
+      line_total: roundMoney(price * quantity),
+      price_source: 'manual',
+    };
+  }
+
+  const tiers = await fetchProductTiers(client, product.id);
+  const resolvedDecimal = resolveProductUnitPrice(product, quantity, tiers);
+
+  if (resolvedDecimal === null) {
+    throw new Error(`No valid price available for product "${product.name}"`);
+  }
+
+  const price = roundMoney(resolvedDecimal.toNumber());
+
+  // Determine price source by checking which pricing path was taken
+  let priceSource = 'retail';
+  const normalizedTiers = tiers.filter(
+    (t) => t.min_qty != null && t.unit_price != null && Number(t.min_qty) >= 1
+  );
+  const tierHit = normalizedTiers.find(
+    (t) =>
+      quantity >= Number(t.min_qty) &&
+      (t.max_qty == null || quantity <= Number(t.max_qty))
+  );
+  if (tierHit) {
+    priceSource = 'tier';
+  } else {
+    const wholesale = Number(product.wholesale_price);
+    const minWholesaleQty = Number(product.min_qty_wholesale);
+    if (
+      Number.isFinite(wholesale) &&
+      wholesale > 0 &&
+      Number.isFinite(minWholesaleQty) &&
+      minWholesaleQty >= 1 &&
+      quantity >= minWholesaleQty
+    ) {
+      priceSource = 'wholesale';
+    }
+  }
+
+  return {
+    price_at_purchase: price,
+    line_total: roundMoney(price * quantity),
+    price_source: priceSource,
+  };
 }
 
 // GET ALL ORDERS
@@ -362,7 +444,7 @@ const guestCheckout = async (req, res) => {
       customerId = newCustomer.rows[0].id;
     }
 
-    // Validate and prepare order items
+    // Validate and prepare order items using server-side pricing
     const preparedItems = [];
     let computedTotalAmount = 0;
 
@@ -379,24 +461,18 @@ const guestCheckout = async (req, res) => {
 
       const product = await fetchValidatedProduct(client, productId);
 
-      let priceAtPurchase = rawItem.unit_price ?? rawItem.price_at_purchase ?? null;
-      if (priceAtPurchase === null || priceAtPurchase === undefined || priceAtPurchase === '') {
-        priceAtPurchase = product.retail_price;
-      }
-      priceAtPurchase = toNumber(priceAtPurchase, NaN);
+      // Guest checkout: manual-price products cannot be ordered without an admin price
+      // computeItemPricing will throw an explicit error for manual products without a price
+      const pricing = await computeItemPricing(client, product, quantity, null);
 
-      if (!Number.isFinite(priceAtPurchase) || priceAtPurchase < 0) {
-        throw new Error(`Invalid price for product ${productId}`);
-      }
-
-      const lineTotal = roundMoney(quantity * priceAtPurchase);
-      computedTotalAmount += lineTotal;
+      computedTotalAmount += pricing.line_total;
 
       preparedItems.push({
         product_id: productId,
         quantity,
-        price_at_purchase: roundMoney(priceAtPurchase),
-        line_total: lineTotal,
+        price_at_purchase: pricing.price_at_purchase,
+        line_total: pricing.line_total,
+        price_source: pricing.price_source,
         product_name: product.name,
       });
     }
@@ -440,12 +516,46 @@ const guestCheckout = async (req, res) => {
     const orderId = orderResult.rows[0].id;
 
     for (const item of preparedItems) {
+      const itemResult = await client.query(
+        `
+        INSERT INTO order_items
+          (order_id, product_id, quantity, price_at_purchase, line_total, price_source)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id, pricing_locked_at
+        `,
+        [
+          orderId,
+          item.product_id,
+          item.quantity,
+          item.price_at_purchase,
+          item.line_total,
+          item.price_source,
+        ]
+      );
+
+      const orderItemId = itemResult.rows[0].id;
+      const rawLockedAt = itemResult.rows[0].pricing_locked_at;
+      if (!rawLockedAt) {
+        console.warn(`guestCheckout: pricing_locked_at not set by trigger for order_item ${orderItemId}; migration 20260426_pricing_integrity_pr1.sql may not have been applied`);
+      }
+      const pricingLockedAt = rawLockedAt || new Date().toISOString();
+
       await client.query(
         `
-        INSERT INTO order_items (order_id, product_id, quantity, price_at_purchase, line_total)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO order_item_pricing_audit
+          (order_item_id, order_id, product_id, quantity, price_at_purchase, line_total, price_source, pricing_locked_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         `,
-        [orderId, item.product_id, item.quantity, item.price_at_purchase, item.line_total]
+        [
+          orderItemId,
+          orderId,
+          item.product_id,
+          item.quantity,
+          item.price_at_purchase,
+          item.line_total,
+          item.price_source,
+          pricingLockedAt,
+        ]
       );
     }
 
@@ -559,29 +669,19 @@ const createOrder = async (req, res) => {
 
       const product = await fetchValidatedProduct(client, productId);
 
-      let priceAtPurchase = rawItem.unit_price ?? rawItem.price_at_purchase ?? null;
-      if (priceAtPurchase === null || priceAtPurchase === undefined || priceAtPurchase === '') {
-        priceAtPurchase = product.retail_price;
-      }
+      // For admin orders, pass the client-submitted price only for manual-price products.
+      // For all other products, the price is computed server-side from the pricing engine.
+      const submittedPrice = rawItem.unit_price ?? rawItem.price_at_purchase ?? null;
+      const pricing = await computeItemPricing(client, product, quantity, submittedPrice);
 
-      priceAtPurchase = toNumber(priceAtPurchase, NaN);
-
-      if (!Number.isFinite(priceAtPurchase) || priceAtPurchase < 0) {
-        throw new Error(`Invalid price for product ${productId}`);
-      }
-
-      if ((product.retail_price === null || product.retail_price === undefined) && priceAtPurchase === null) {
-        throw new Error(`No valid price available for product ${productId}`);
-      }
-
-      const lineTotal = roundMoney(quantity * priceAtPurchase);
-      computedTotalAmount += lineTotal;
+      computedTotalAmount += pricing.line_total;
 
       preparedItems.push({
         product_id: productId,
         quantity,
-        price_at_purchase: roundMoney(priceAtPurchase),
-        line_total: lineTotal,
+        price_at_purchase: pricing.price_at_purchase,
+        line_total: pricing.line_total,
+        price_source: pricing.price_source,
         product_name: product.name,
       });
     }
@@ -654,7 +754,7 @@ const createOrder = async (req, res) => {
     const orderId = orderResult.rows[0].id;
 
     for (const item of preparedItems) {
-      await client.query(
+      const itemResult = await client.query(
         `
         INSERT INTO order_items
         (
@@ -662,9 +762,11 @@ const createOrder = async (req, res) => {
           product_id,
           quantity,
           price_at_purchase,
-          line_total
+          line_total,
+          price_source
         )
-        VALUES ($1, $2, $3, $4, $5)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id, pricing_locked_at
         `,
         [
           orderId,
@@ -672,6 +774,32 @@ const createOrder = async (req, res) => {
           item.quantity,
           item.price_at_purchase,
           item.line_total,
+          item.price_source,
+        ]
+      );
+
+      const orderItemId = itemResult.rows[0].id;
+      const rawLockedAt = itemResult.rows[0].pricing_locked_at;
+      if (!rawLockedAt) {
+        console.warn(`createOrder: pricing_locked_at not set by trigger for order_item ${orderItemId}; migration 20260426_pricing_integrity_pr1.sql may not have been applied`);
+      }
+      const pricingLockedAt = rawLockedAt || new Date().toISOString();
+
+      await client.query(
+        `
+        INSERT INTO order_item_pricing_audit
+          (order_item_id, order_id, product_id, quantity, price_at_purchase, line_total, price_source, pricing_locked_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `,
+        [
+          orderItemId,
+          orderId,
+          item.product_id,
+          item.quantity,
+          item.price_at_purchase,
+          item.line_total,
+          item.price_source,
+          pricingLockedAt,
         ]
       );
     }
