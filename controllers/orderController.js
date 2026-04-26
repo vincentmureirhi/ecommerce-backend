@@ -1171,6 +1171,11 @@ const getOrderForPrint = async (req, res) => {
             font-size: 9px;
           }
 
+          @page {
+            size: 80mm auto;
+            margin: 0;
+          }
+
           @media print {
             body {
               width: 80mm;
@@ -1323,7 +1328,7 @@ const getOrderForPrint = async (req, res) => {
         </div>
 
         <script>
-          window.print();
+          window.addEventListener('load', function () { window.print(); });
         </script>
       </body>
       </html>
