@@ -29,7 +29,7 @@ async function autoProgressOrders() {
          updated_at        = CURRENT_TIMESTAMP
      WHERE order_status = 'processing'
        AND status_changed_at IS NOT NULL
-       AND status_changed_at < NOW() - ($1 || ' hours')::INTERVAL
+       AND status_changed_at < NOW() - $1 * INTERVAL '1 hour'
      RETURNING id, order_number`,
     [PROCESSING_TO_DISPATCHED_HOURS]
   );
@@ -50,7 +50,7 @@ async function autoProgressOrders() {
          updated_at        = CURRENT_TIMESTAMP
      WHERE order_status = 'dispatched'
        AND status_changed_at IS NOT NULL
-       AND status_changed_at < NOW() - ($1 || ' hours')::INTERVAL
+       AND status_changed_at < NOW() - $1 * INTERVAL '1 hour'
      RETURNING id, order_number`,
     [DISPATCHED_TO_COMPLETED_HOURS]
   );

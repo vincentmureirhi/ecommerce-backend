@@ -1523,7 +1523,6 @@ const trackPublicOrder = async (req, res) => {
     // Attach structured tracking fields for customer-facing progress display.
     // These supplement the raw order fields without removing any existing data.
     const trackingStage = deriveTrackingStage(order);
-    order.current_status = order.order_status;
     order.current_tracking_stage = trackingStage.current_tracking_stage;
     order.tracking_summary = trackingStage.tracking_summary;
 
