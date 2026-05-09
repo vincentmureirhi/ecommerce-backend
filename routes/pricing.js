@@ -12,7 +12,7 @@ const {
 // Rate limiter for the public evaluate endpoint (prevents abuse / scraping)
 const evaluateLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 60,             // up to 60 requests per IP per minute
+  max: 60,
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, error: 'Too many requests, please try again later.' },

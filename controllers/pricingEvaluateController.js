@@ -114,7 +114,7 @@ const evaluatePricing = async (req, res) => {
         return handleError(res, 400, 'Each item must have a valid product_id');
       }
       if (!Number.isInteger(quantity) || quantity <= 0) {
-        return handleError(res, 400, `quantity must be a positive integer for product_id ${productId}`);
+        return handleError(res, 400, `Quantity must be a positive integer for product_id ${productId}`);
       }
       rawItems.push({ product_id: productId, quantity });
     }
