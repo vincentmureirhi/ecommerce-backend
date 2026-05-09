@@ -43,9 +43,13 @@ const getAllProducts = async (req, res) => {
             THEN GREATEST(p.retail_price - fs.discount_value, 0)
           ELSE NULL
         END AS discounted_price,
+
+        COALESCE(pt.price_tiers, '[]'::json) AS price_tiers
+
         pr.rule_type AS pricing_rule_type,
         pr.name AS pricing_rule_name,
         pr.threshold_qty AS wholesale_threshold_qty
+
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN departments d ON d.id = p.department_id
@@ -55,7 +59,25 @@ const getAllProducts = async (req, res) => {
        AND fs.is_active = TRUE
        AND fs.start_date <= NOW()
        AND fs.end_date >= NOW()
-      LEFT JOIN pricing_rules pr ON pr.id = p.pricing_rule_id
+
+      LEFT JOIN (
+        SELECT
+          product_id,
+          json_agg(
+            json_build_object(
+              'id', id,
+              'min_qty', min_qty,
+              'max_qty', max_qty,
+              'unit_price', unit_price
+            )
+            ORDER BY min_qty ASC
+          ) AS price_tiers
+        FROM product_price_tiers
+        GROUP BY product_id
+      ) pt ON pt.product_id = p.id
+
+LEFT JOIN pricing_rules pr ON pr.id = p.pricing_rule_id
+
       ORDER BY p.id DESC
     `);
     return handleSuccess(res, 200, "Products retrieved", r.rows);
@@ -85,9 +107,28 @@ const getProductById = async (req, res) => {
             THEN GREATEST(p.retail_price - fs.discount_value, 0)
           ELSE NULL
         END AS discounted_price,
+
+        COALESCE(
+          (
+            SELECT json_agg(
+              json_build_object(
+                'id', ppt.id,
+                'min_qty', ppt.min_qty,
+                'max_qty', ppt.max_qty,
+                'unit_price', ppt.unit_price
+              )
+              ORDER BY ppt.min_qty ASC
+            )
+            FROM product_price_tiers ppt
+            WHERE ppt.product_id = p.id
+          ),
+          '[]'::json
+        ) AS price_tiers
+
         pr.rule_type AS pricing_rule_type,
         pr.name AS pricing_rule_name,
         pr.threshold_qty AS wholesale_threshold_qty
+
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN departments d ON d.id = p.department_id

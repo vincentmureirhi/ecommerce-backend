@@ -3,7 +3,9 @@
 const pool = require('../config/database');
 const { handleError, handleSuccess } = require('../utils/errorHandler');
 const generateOrderNumber = require('../utils/generateOrderNumber');
+
 const { evaluateCartPricing } = require('../utils/pricingRuleEvaluator');
+
 
 const VALID_ORDER_TYPES = new Set(['normal', 'route']);
 const VALID_ORDER_STATUSES = new Set(['pending', 'processing', 'dispatched', 'completed', 'cancelled']);
@@ -89,6 +91,7 @@ async function fetchValidatedProduct(client, productId) {
       sku,
       retail_price,
       wholesale_price,
+      min_qty_wholesale,
       requires_manual_price,
       current_stock
     FROM products
@@ -103,6 +106,7 @@ async function fetchValidatedProduct(client, productId) {
 
   return result.rows[0];
 }
+
 
 /**
  * Batch-fetch products with their active pricing rule and price tiers.
@@ -163,6 +167,7 @@ async function loadPricingContext(client, productIds) {
   }
 
   return { productMap, tiersMap };
+
 }
 
 // GET ALL ORDERS
@@ -424,8 +429,10 @@ const guestCheckout = async (req, res) => {
       customerId = newCustomer.rows[0].id;
     }
 
+
     // Validate items and collect product IDs
     const rawItems = [];
+
     for (const rawItem of items) {
       const productId = Number(rawItem.product_id);
       const quantity = Number(rawItem.quantity || 0);
@@ -439,6 +446,7 @@ const guestCheckout = async (req, res) => {
 
       rawItems.push({ product_id: productId, quantity });
     }
+
 
     // Batch-load products with pricing rule context and tiers
     const productIds = rawItems.map((i) => i.product_id);
@@ -486,6 +494,7 @@ const guestCheckout = async (req, res) => {
         price_at_purchase: roundMoney(priceAtPurchase),
         line_total: lineTotal,
         price_source: priceSource,
+
         product_name: product.name,
       });
     }
@@ -529,11 +538,12 @@ const guestCheckout = async (req, res) => {
     const orderId = orderResult.rows[0].id;
 
     for (const item of preparedItems) {
-      await client.query(
+      const itemResult = await client.query(
         `
         INSERT INTO order_items
           (order_id, product_id, quantity, price_at_purchase, line_total, price_source)
         VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id, pricing_locked_at
         `,
         [
           orderId,
@@ -542,6 +552,35 @@ const guestCheckout = async (req, res) => {
           item.price_at_purchase,
           item.line_total,
           item.price_source,
+        ]
+      );
+
+      const orderItemId = itemResult.rows[0].id;
+      const rawLockedAt = itemResult.rows[0].pricing_locked_at;
+      if (!rawLockedAt) {
+        console.warn(`guestCheckout: pricing_locked_at not set by trigger for order_item ${orderItemId}; migration 20260426_pricing_integrity_pr1.sql may not have been applied`);
+      }
+      const pricingLockedAt = rawLockedAt || new Date().toISOString();
+
+      await client.query(
+        `
+
+        INSERT INTO order_item_pricing_audit
+          (order_item_id, order_id, product_id, quantity, price_at_purchase, line_total, price_source, pricing_locked_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `,
+        [
+          orderItemId,
+
+          orderId,
+          item.product_id,
+          item.quantity,
+          item.price_at_purchase,
+          item.line_total,
+          item.price_source,
+
+          pricingLockedAt,
+
         ]
       );
     }
@@ -659,6 +698,7 @@ const createOrder = async (req, res) => {
       });
     }
 
+
     // Batch-load products with pricing rule context and tiers
     const productIds = rawItems.map((i) => i.product_id);
     const { productMap, tiersMap } = await loadPricingContext(client, productIds);
@@ -715,6 +755,7 @@ const createOrder = async (req, res) => {
         price_at_purchase: roundMoney(priceAtPurchase),
         line_total: lineTotal,
         price_source: priceSource,
+
         product_name: product.name,
       });
     }
@@ -787,7 +828,7 @@ const createOrder = async (req, res) => {
     const orderId = orderResult.rows[0].id;
 
     for (const item of preparedItems) {
-      await client.query(
+      const itemResult = await client.query(
         `
         INSERT INTO order_items
         (
@@ -799,6 +840,9 @@ const createOrder = async (req, res) => {
           price_source
         )
         VALUES ($1, $2, $3, $4, $5, $6)
+
+        RETURNING id, pricing_locked_at
+
         `,
         [
           orderId,
@@ -807,6 +851,33 @@ const createOrder = async (req, res) => {
           item.price_at_purchase,
           item.line_total,
           item.price_source,
+
+        ]
+      );
+
+      const orderItemId = itemResult.rows[0].id;
+      const rawLockedAt = itemResult.rows[0].pricing_locked_at;
+      if (!rawLockedAt) {
+        console.warn(`createOrder: pricing_locked_at not set by trigger for order_item ${orderItemId}; migration 20260426_pricing_integrity_pr1.sql may not have been applied`);
+      }
+      const pricingLockedAt = rawLockedAt || new Date().toISOString();
+
+      await client.query(
+        `
+        INSERT INTO order_item_pricing_audit
+          (order_item_id, order_id, product_id, quantity, price_at_purchase, line_total, price_source, pricing_locked_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `,
+        [
+          orderItemId,
+          orderId,
+          item.product_id,
+          item.quantity,
+          item.price_at_purchase,
+          item.line_total,
+          item.price_source,
+          pricingLockedAt,
+
         ]
       );
     }
