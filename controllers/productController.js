@@ -43,7 +43,12 @@ const getAllProducts = async (req, res) => {
             THEN GREATEST(p.retail_price - fs.discount_value, 0)
           ELSE NULL
         END AS discounted_price,
-        COALESCE(pt.price_tiers, '[]'::json) AS price_tiers
+
+        COALESCE(pt.price_tiers, '[]'::json) AS price_tiers,
+        pr.rule_type AS pricing_rule_type,
+        pr.name AS pricing_rule_name,
+        pr.threshold_qty AS wholesale_threshold_qty
+
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN departments d ON d.id = p.department_id
@@ -53,6 +58,7 @@ const getAllProducts = async (req, res) => {
        AND fs.is_active = TRUE
        AND fs.start_date <= NOW()
        AND fs.end_date >= NOW()
+
       LEFT JOIN (
         SELECT
           product_id,
@@ -68,6 +74,8 @@ const getAllProducts = async (req, res) => {
         FROM product_price_tiers
         GROUP BY product_id
       ) pt ON pt.product_id = p.id
+      LEFT JOIN pricing_rules pr ON pr.id = p.pricing_rule_id
+
       ORDER BY p.id DESC
     `);
     return handleSuccess(res, 200, "Products retrieved", r.rows);
@@ -97,6 +105,7 @@ const getProductById = async (req, res) => {
             THEN GREATEST(p.retail_price - fs.discount_value, 0)
           ELSE NULL
         END AS discounted_price,
+
         COALESCE(
           (
             SELECT json_agg(
@@ -112,7 +121,11 @@ const getProductById = async (req, res) => {
             WHERE ppt.product_id = p.id
           ),
           '[]'::json
-        ) AS price_tiers
+        ) AS price_tiers,
+        pr.rule_type AS pricing_rule_type,
+        pr.name AS pricing_rule_name,
+        pr.threshold_qty AS wholesale_threshold_qty
+
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN departments d ON d.id = p.department_id
@@ -122,6 +135,7 @@ const getProductById = async (req, res) => {
        AND fs.is_active = TRUE
        AND fs.start_date <= NOW()
        AND fs.end_date >= NOW()
+      LEFT JOIN pricing_rules pr ON pr.id = p.pricing_rule_id
       WHERE p.id = $1
       `,
       [id]
@@ -150,6 +164,12 @@ const createProduct = async (req, res) => {
     // Profit calculation needs cost_price even if manual pricing product
     const cost_price = toMoney(req.body.cost_price, "cost_price", { allowNull: true });
 
+    const pricing_rule_id = toInt(
+      req.body.pricing_rule_id,
+      "pricing_rule_id",
+      { allowNull: true }
+    );
+
     let retail_price = null;
     let wholesale_price = null;
     let min_qty_wholesale = null;
@@ -166,9 +186,9 @@ const createProduct = async (req, res) => {
         name, sku, category_id, department_id,
         current_stock, cost_price,
         retail_price, wholesale_price, min_qty_wholesale,
-        requires_manual_price, image_url
+        requires_manual_price, image_url, pricing_rule_id
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
       RETURNING *
       `,
       [
@@ -183,6 +203,7 @@ const createProduct = async (req, res) => {
         min_qty_wholesale,
         requires_manual_price,
         image_url,
+        pricing_rule_id,
       ]
     );
 
@@ -209,6 +230,12 @@ const updateProduct = async (req, res) => {
     const image_url = req.body.image_url ? String(req.body.image_url).trim() : null;
     const cost_price = toMoney(req.body.cost_price, "cost_price", { allowNull: true });
 
+    const pricing_rule_id = toInt(
+      req.body.pricing_rule_id,
+      "pricing_rule_id",
+      { allowNull: true }
+    );
+
     let retail_price = null;
     let wholesale_price = null;
     let min_qty_wholesale = null;
@@ -233,8 +260,9 @@ const updateProduct = async (req, res) => {
         wholesale_price=$8,
         min_qty_wholesale=$9,
         requires_manual_price=$10,
-        image_url=$11
-      WHERE id=$12
+        image_url=$11,
+        pricing_rule_id=$12
+      WHERE id=$13
       RETURNING *
       `,
       [
@@ -249,6 +277,7 @@ const updateProduct = async (req, res) => {
         min_qty_wholesale,
         requires_manual_price,
         image_url,
+        pricing_rule_id,
         id,
       ]
     );
