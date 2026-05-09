@@ -4,8 +4,48 @@ const pool = require('../config/database');
 const { handleError, handleSuccess } = require('../utils/errorHandler');
 const generateOrderNumber = require('../utils/generateOrderNumber');
 
-const { evaluateCartPricing } = require('../utils/pricingRuleEvaluator');
+const { evaluateCartPricingWithMeta } = require('../utils/pricingRuleEvaluator');
 
+/**
+ * Business-rule validation error for order creation.
+ * Signals a client-caused violation (e.g. wholesale requested below threshold).
+ * Caught in endpoint handlers and mapped to HTTP 422 Unprocessable Entity.
+ */
+class OrderValidationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'OrderValidationError';
+    this.isOrderValidationError = true;
+  }
+}
+
+/**
+ * Validate that a client-declared pricing_mode is compatible with the
+ * server-computed wholesale eligibility for the item.  This is the central
+ * enforcement point: the backend is the sole pricing authority, and any
+ * explicit wholesale request below threshold is rejected with a 422.
+ *
+ * @param {string|undefined} pricingMode   - client-supplied pricing_mode value
+ * @param {Object}           evalItem      - result from evaluateCartPricingWithMeta
+ * @param {number}           productId
+ * @throws {OrderValidationError} when wholesale is requested but not eligible
+ */
+function assertWholesaleEligibility(pricingMode, evalItem, productId) {
+  if (pricingMode !== 'wholesale') return; // no explicit wholesale intent — nothing to validate
+
+  if (!evalItem.is_wholesale_eligible) {
+    const threshold = evalItem.threshold_qty;
+    const effective = evalItem.effective_qty;
+    const thresholdMsg = threshold != null
+      ? `wholesale pricing requires at least ${threshold} unit(s)`
+      : 'wholesale pricing is not available for this product';
+    throw new OrderValidationError(
+      `Wholesale pricing rejected for product ${productId}: ` +
+      `${thresholdMsg} (effective quantity: ${effective}). ` +
+      `The backend enforces threshold eligibility server-side and cannot grant wholesale pricing below the configured threshold.`
+    );
+  }
+}
 
 const VALID_ORDER_TYPES = new Set(['normal', 'route']);
 const VALID_ORDER_STATUSES = new Set(['pending', 'processing', 'dispatched', 'completed', 'cancelled']);
@@ -444,7 +484,7 @@ const guestCheckout = async (req, res) => {
         throw new Error(`Invalid quantity for product ${productId}`);
       }
 
-      rawItems.push({ product_id: productId, quantity });
+      rawItems.push({ product_id: productId, quantity, pricing_mode: rawItem.pricing_mode || null });
     }
 
 
@@ -458,8 +498,16 @@ const guestCheckout = async (req, res) => {
       }
     }
 
-    // Server-side price resolution via pricing rule evaluator
-    const evaluatedItems = evaluateCartPricing(rawItems, productMap, tiersMap);
+    // Server-side price resolution via pricing rule evaluator.
+    // The backend is the sole pricing authority; client-supplied prices are
+    // never used for non-manual products.  If the client explicitly requested
+    // wholesale pricing, we validate that eligibility is actually met.
+    const evaluatedItems = evaluateCartPricingWithMeta(rawItems, productMap, tiersMap);
+
+    // Validate explicit wholesale requests against server-computed eligibility
+    for (let i = 0; i < rawItems.length; i++) {
+      assertWholesaleEligibility(rawItems[i].pricing_mode, evaluatedItems[i], rawItems[i].product_id);
+    }
 
     const preparedItems = [];
     let computedTotalAmount = 0;
@@ -593,6 +641,9 @@ const guestCheckout = async (req, res) => {
     return handleSuccess(res, 201, 'Order placed successfully', createdOrder);
   } catch (err) {
     await client.query('ROLLBACK');
+    if (err.isOrderValidationError) {
+      return handleError(res, 422, err.message);
+    }
     console.error('guestCheckout error:', err.message);
     return handleError(res, 500, 'Failed to place order', err);
   } finally {
@@ -691,6 +742,7 @@ const createOrder = async (req, res) => {
         product_id: productId,
         quantity,
         submitted_price: rawItem.unit_price ?? rawItem.price_at_purchase ?? null,
+        pricing_mode: rawItem.pricing_mode || null,
       });
     }
 
@@ -705,8 +757,16 @@ const createOrder = async (req, res) => {
       }
     }
 
-    // Server-side price resolution via pricing rule evaluator
-    const evaluatedItems = evaluateCartPricing(rawItems, productMap, tiersMap);
+    // Server-side price resolution via pricing rule evaluator.
+    // The backend is the sole pricing authority; client-supplied prices are
+    // never used for non-manual products.  If the client explicitly requested
+    // wholesale pricing, we validate that eligibility is actually met.
+    const evaluatedItems = evaluateCartPricingWithMeta(rawItems, productMap, tiersMap);
+
+    // Validate explicit wholesale requests against server-computed eligibility
+    for (let i = 0; i < rawItems.length; i++) {
+      assertWholesaleEligibility(rawItems[i].pricing_mode, evaluatedItems[i], rawItems[i].product_id);
+    }
 
     const preparedItems = [];
     let computedTotalAmount = 0;
@@ -887,6 +947,9 @@ const createOrder = async (req, res) => {
     return handleSuccess(res, 201, 'Order created successfully', createdOrder);
   } catch (err) {
     await client.query('ROLLBACK');
+    if (err.isOrderValidationError) {
+      return handleError(res, 422, err.message);
+    }
     console.error('createOrder error:', err.message);
     return handleError(res, 500, 'Failed to create order', err);
   } finally {
