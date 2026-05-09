@@ -44,8 +44,7 @@ const getAllProducts = async (req, res) => {
           ELSE NULL
         END AS discounted_price,
 
-        COALESCE(pt.price_tiers, '[]'::json) AS price_tiers
-
+        COALESCE(pt.price_tiers, '[]'::json) AS price_tiers,
         pr.rule_type AS pricing_rule_type,
         pr.name AS pricing_rule_name,
         pr.threshold_qty AS wholesale_threshold_qty
@@ -75,8 +74,7 @@ const getAllProducts = async (req, res) => {
         FROM product_price_tiers
         GROUP BY product_id
       ) pt ON pt.product_id = p.id
-
-LEFT JOIN pricing_rules pr ON pr.id = p.pricing_rule_id
+      LEFT JOIN pricing_rules pr ON pr.id = p.pricing_rule_id
 
       ORDER BY p.id DESC
     `);
@@ -123,8 +121,7 @@ const getProductById = async (req, res) => {
             WHERE ppt.product_id = p.id
           ),
           '[]'::json
-        ) AS price_tiers
-
+        ) AS price_tiers,
         pr.rule_type AS pricing_rule_type,
         pr.name AS pricing_rule_name,
         pr.threshold_qty AS wholesale_threshold_qty

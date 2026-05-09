@@ -564,23 +564,19 @@ const guestCheckout = async (req, res) => {
 
       await client.query(
         `
-
         INSERT INTO order_item_pricing_audit
           (order_item_id, order_id, product_id, quantity, price_at_purchase, line_total, price_source, pricing_locked_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         `,
         [
           orderItemId,
-
           orderId,
           item.product_id,
           item.quantity,
           item.price_at_purchase,
           item.line_total,
           item.price_source,
-
           pricingLockedAt,
-
         ]
       );
     }
@@ -840,9 +836,7 @@ const createOrder = async (req, res) => {
           price_source
         )
         VALUES ($1, $2, $3, $4, $5, $6)
-
         RETURNING id, pricing_locked_at
-
         `,
         [
           orderId,
@@ -851,7 +845,6 @@ const createOrder = async (req, res) => {
           item.price_at_purchase,
           item.line_total,
           item.price_source,
-
         ]
       );
 
