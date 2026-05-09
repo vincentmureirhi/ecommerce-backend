@@ -277,12 +277,18 @@ console.log('pricingRuleEvaluator tests passed');
 // describePricing — human-readable summaries
 // ─────────────────────────────────────────────────────────────────────────────
 
-// CONSTANT rule → fixed price label
+// CONSTANT rule → fixed price label (wholesale is ignored regardless of quantity)
 {
   const product = { retail_price: '200', wholesale_price: '120', min_qty_wholesale: 5, requires_manual_price: false };
   const rule = { id: 1, rule_type: RULE_TYPES.CONSTANT, threshold_qty: null, name: null };
   const label = describePricing(product, rule, []);
   assert.strictEqual(label, 'Fixed price: KES 200.00');
+  // Confirm wholesale is not reflected in the label (retail-only rule)
+  assert.ok(!label.includes('Wholesale'), 'CONSTANT rule label must not mention wholesale');
+  // Confirm the resolved price is retail only via resolveItemPricing
+  const { unitPrice, priceSource } = resolveItemPricing(product, 100, [], rule);
+  assert.strictEqual(unitPrice.toFixed(2), '200.00', 'CONSTANT should always return retail');
+  assert.strictEqual(priceSource, 'rule:CONSTANT');
 }
 
 // SKU_THRESHOLD rule → retail|wholesale from N pcs
@@ -414,6 +420,8 @@ console.log('pricingRuleEvaluator tests passed');
   assert.strictEqual(result[0].effective_qty, 11, 'effective_qty should be group total');
   assert.strictEqual(result[0].rule_name, 'Combo G');
   assert.strictEqual(result[1].is_wholesale_eligible, true);
+  assert.strictEqual(result[0].unit_price.toFixed(2), '70.00', 'productA should get wholesale price');
+  assert.strictEqual(result[1].unit_price.toFixed(2), '55.00', 'productB should get wholesale price');
 }
 
 console.log('describePricing and evaluateCartPricingWithMeta tests passed');
