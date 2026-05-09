@@ -38,6 +38,7 @@ const routeCustomerPortalRoutes = require('./routes/routeCustomerPortal');
 const flashSalesRoutes = require('./routes/flashSales');
 const blogRoutes = require('./routes/blog');
 const pricingRulesRoutes = require('./routes/pricingRules');
+const pricingRoutes = require('./routes/pricing');
 
 const app = express();
 
@@ -107,6 +108,7 @@ app.use('/api/route-customer-portal', routeCustomerPortalRoutes);
 app.use('/api/flash-sales', flashSalesRoutes);
 app.use('/api/blog', blogRoutes);
 app.use('/api/pricing-rules', pricingRulesRoutes);
+app.use('/api/pricing', pricingRoutes);
 
 // ===== 404 =====
 app.use((req, res) => {

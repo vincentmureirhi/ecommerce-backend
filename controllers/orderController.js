@@ -6,6 +6,18 @@ const generateOrderNumber = require('../utils/generateOrderNumber');
 
 const { evaluateCartPricing } = require('../utils/pricingRuleEvaluator');
 
+/**
+ * Lightweight error subclass used to signal business-logic violations
+ * (bad input, threshold not met, product not found, etc.).
+ * Caught in handler catch-blocks and returned as HTTP 422 rather than 500.
+ */
+class OrderValidationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'OrderValidationError';
+    this.isOrderValidationError = true;
+  }
+}
 
 const VALID_ORDER_TYPES = new Set(['normal', 'route']);
 const VALID_ORDER_STATUSES = new Set(['pending', 'processing', 'dispatched', 'completed', 'cancelled']);
@@ -438,10 +450,10 @@ const guestCheckout = async (req, res) => {
       const quantity = Number(rawItem.quantity || 0);
 
       if (!Number.isInteger(productId) || productId <= 0) {
-        throw new Error('Invalid product_id in order items');
+        throw new OrderValidationError('Invalid product_id in order items');
       }
       if (!Number.isFinite(quantity) || quantity <= 0) {
-        throw new Error(`Invalid quantity for product ${productId}`);
+        throw new OrderValidationError(`Invalid quantity for product ${productId}`);
       }
 
       rawItems.push({ product_id: productId, quantity });
@@ -454,7 +466,7 @@ const guestCheckout = async (req, res) => {
 
     for (const item of rawItems) {
       if (!productMap[item.product_id]) {
-        throw new Error(`Product does not exist: ${item.product_id}`);
+        throw new OrderValidationError(`Product does not exist: ${item.product_id}`);
       }
     }
 
@@ -476,7 +488,7 @@ const guestCheckout = async (req, res) => {
         // Guest checkout cannot supply manual prices; fall back to retail
         const fallback = toNumber(product.retail_price, NaN);
         if (!Number.isFinite(fallback) || fallback < 0) {
-          throw new Error(`No valid price available for product ${rawItem.product_id}`);
+          throw new OrderValidationError(`No valid price available for product ${rawItem.product_id}`);
         }
         priceAtPurchase = fallback;
         priceSource = 'retail';
@@ -594,6 +606,9 @@ const guestCheckout = async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('guestCheckout error:', err.message);
+    if (err.isOrderValidationError) {
+      return handleError(res, 422, err.message);
+    }
     return handleError(res, 500, 'Failed to place order', err);
   } finally {
     client.release();
@@ -681,10 +696,10 @@ const createOrder = async (req, res) => {
       const quantity = Number(rawItem.quantity || 0);
 
       if (!Number.isInteger(productId) || productId <= 0) {
-        throw new Error('Invalid product_id in order items');
+        throw new OrderValidationError('Invalid product_id in order items');
       }
       if (!Number.isFinite(quantity) || quantity <= 0) {
-        throw new Error(`Invalid quantity for product ${productId}`);
+        throw new OrderValidationError(`Invalid quantity for product ${productId}`);
       }
 
       rawItems.push({
@@ -701,7 +716,7 @@ const createOrder = async (req, res) => {
 
     for (const item of rawItems) {
       if (!productMap[item.product_id]) {
-        throw new Error(`Product does not exist: ${item.product_id}`);
+        throw new OrderValidationError(`Product does not exist: ${item.product_id}`);
       }
     }
 
@@ -723,18 +738,18 @@ const createOrder = async (req, res) => {
         // Manual product: caller must supply the price
         const submittedPrice = rawItem.submitted_price;
         if (submittedPrice == null || submittedPrice === '') {
-          throw new Error(
+          throw new OrderValidationError(
             `unit_price is required for manual product ${rawItem.product_id}`
           );
         }
         priceAtPurchase = toNumber(submittedPrice, NaN);
         if (!Number.isFinite(priceAtPurchase) || priceAtPurchase < 0) {
-          throw new Error(`Invalid price for product ${rawItem.product_id}`);
+          throw new OrderValidationError(`Invalid price for product ${rawItem.product_id}`);
         }
         priceSource = 'manual_price';
       } else {
         if (evalItem.unit_price == null) {
-          throw new Error(
+          throw new OrderValidationError(
             `No valid price available for product ${rawItem.product_id}`
           );
         }
@@ -888,6 +903,9 @@ const createOrder = async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('createOrder error:', err.message);
+    if (err.isOrderValidationError) {
+      return handleError(res, 422, err.message);
+    }
     return handleError(res, 500, 'Failed to create order', err);
   } finally {
     client.release();
