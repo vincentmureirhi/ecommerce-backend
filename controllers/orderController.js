@@ -484,6 +484,7 @@ const guestCheckout = async (req, res) => {
         throw new Error(`Invalid quantity for product ${productId}`);
       }
 
+      // pricing_mode: normalize falsy values (empty string, undefined) to null
       rawItems.push({ product_id: productId, quantity, pricing_mode: rawItem.pricing_mode || null });
     }
 
@@ -742,6 +743,7 @@ const createOrder = async (req, res) => {
         product_id: productId,
         quantity,
         submitted_price: rawItem.unit_price ?? rawItem.price_at_purchase ?? null,
+        // pricing_mode: normalize falsy values (empty string, undefined) to null
         pricing_mode: rawItem.pricing_mode || null,
       });
     }

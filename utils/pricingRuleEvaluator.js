@@ -186,9 +186,9 @@ function derivePricingLabel(priceSource, ruleType) {
   if (!priceSource || priceSource === 'unknown_product') return 'unknown_product';
   if (priceSource === 'manual_price') return 'manual_price';
   if (priceSource.includes('wholesale')) return `wholesale (${ruleType || 'legacy'})`;
-  if (priceSource.includes(':tier') || priceSource === 'tier') return `tier (${ruleType || 'legacy'})`;
-  if (priceSource === 'rule:CONSTANT') return 'constant';
-  if (priceSource.includes(':retail') || priceSource === 'retail') return `retail (${ruleType || 'legacy'})`;
+  if (priceSource.includes('tier')) return `tier (${ruleType || 'legacy'})`;
+  if (priceSource.includes('CONSTANT')) return 'constant';
+  if (priceSource.includes('retail') || priceSource === 'retail') return `retail (${ruleType || 'legacy'})`;
   return priceSource;
 }
 
