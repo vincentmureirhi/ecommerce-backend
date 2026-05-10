@@ -37,6 +37,7 @@ const analyticsRoutes = require('./routes/analytics');
 const routeCustomerPortalRoutes = require('./routes/routeCustomerPortal');
 const flashSalesRoutes = require('./routes/flashSales');
 const blogRoutes = require('./routes/blog');
+const pricingRoutes = require('./routes/pricing');
 const pricingRulesRoutes = require('./routes/pricingRules');
 
 const app = express();
@@ -106,6 +107,7 @@ app.use('/api/admin-users', adminUsersRoutes);
 app.use('/api/route-customer-portal', routeCustomerPortalRoutes);
 app.use('/api/flash-sales', flashSalesRoutes);
 app.use('/api/blog', blogRoutes);
+app.use('/api/pricing', pricingRoutes);
 app.use('/api/pricing-rules', pricingRulesRoutes);
 
 // ===== 404 =====
