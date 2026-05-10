@@ -64,6 +64,15 @@ function normalizeText(value) {
   return text || null;
 }
 
+function normalizeWorkflowType(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return null;
+  if (!['normal_self_service', 'route_self_service', 'route_sales_rep_capture'].includes(normalized)) {
+    return null;
+  }
+  return normalized;
+}
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -145,6 +154,125 @@ async function fetchValidatedProduct(client, productId) {
   }
 
   return result.rows[0];
+}
+
+async function resolveRouteCustomerForOrder(client, params) {
+  const {
+    customerId,
+    customerName,
+    customerPhone,
+    salesRepId,
+    locationId,
+    address,
+    routeArea,
+    routeNotes,
+  } = params;
+
+  if (customerId) {
+    const existing = await client.query(
+      `
+      SELECT id, customer_type, sales_rep_id
+      FROM customers
+      WHERE id = $1
+      `,
+      [customerId]
+    );
+
+    if (existing.rows.length === 0) {
+      throw new OrderValidationError('Customer does not exist');
+    }
+
+    if (existing.rows[0].customer_type !== 'route') {
+      throw new OrderValidationError('Route orders must use a route customer');
+    }
+
+    if (salesRepId && !existing.rows[0].sales_rep_id) {
+      await client.query(
+        `
+        UPDATE customers
+        SET sales_rep_id = $1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2
+        `,
+        [salesRepId, customerId]
+      );
+    }
+
+    return customerId;
+  }
+
+  const existingByPhone = await client.query(
+    `
+    SELECT id
+    FROM customers
+    WHERE customer_type = 'route'
+      AND phone = $1
+    ORDER BY id ASC
+    LIMIT 1
+    `,
+    [customerPhone]
+  );
+
+  if (existingByPhone.rows.length > 0) {
+    const existingId = existingByPhone.rows[0].id;
+    await client.query(
+      `
+      UPDATE customers
+      SET
+        name = $1,
+        sales_rep_id = COALESCE($2, sales_rep_id),
+        location_id = COALESCE($3, location_id),
+        address = COALESCE($4, address),
+        route_area = COALESCE($5, route_area),
+        route_notes = COALESCE($6, route_notes),
+        is_active = TRUE,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $7
+      `,
+      [
+        customerName,
+        salesRepId || null,
+        locationId || null,
+        address || null,
+        routeArea || null,
+        routeNotes || null,
+        existingId,
+      ]
+    );
+    return existingId;
+  }
+
+  const insertResult = await client.query(
+    `
+    INSERT INTO customers
+    (
+      name,
+      phone,
+      customer_type,
+      sales_rep_id,
+      location_id,
+      address,
+      route_area,
+      route_notes,
+      is_active,
+      created_at,
+      updated_at
+    )
+    VALUES ($1, $2, 'route', $3, $4, $5, $6, $7, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    RETURNING id
+    `,
+    [
+      customerName,
+      customerPhone,
+      salesRepId || null,
+      locationId || null,
+      address || null,
+      routeArea || null,
+      routeNotes || null,
+    ]
+  );
+
+  return insertResult.rows[0].id;
 }
 
 
@@ -318,6 +446,7 @@ const getAllOrders = async (req, res) => {
     const {
       order_type,
       order_status,
+      workflow_type,
       customer_id,
       sales_rep_id,
       search,
@@ -356,6 +485,12 @@ const getAllOrders = async (req, res) => {
     if (order_status) {
       params.push(order_status);
       query += ` AND o.order_status = $${paramIndex}`;
+      paramIndex++;
+    }
+
+    if (workflow_type) {
+      params.push(workflow_type);
+      query += ` AND o.order_workflow_type = $${paramIndex}`;
       paramIndex++;
     }
 
@@ -664,6 +799,7 @@ const guestCheckout = async (req, res) => {
         customer_phone,
         customer_email,
         delivery_address,
+        order_workflow_type,
         total_amount,
         amount_paid,
         notes,
@@ -671,7 +807,7 @@ const guestCheckout = async (req, res) => {
         payment_state,
         is_printed
       )
-      VALUES ($1, 'normal', $2, $3, $4, $5, $6, $7, 0, $8, 'pending', 'unpaid', FALSE)
+      VALUES ($1, 'normal', $2, $3, $4, $5, $6, 'normal_self_service', $7, 0, $8, 'pending', 'unpaid', FALSE)
       RETURNING *
       `,
       [
@@ -764,7 +900,12 @@ const createOrder = async (req, res) => {
       customer_id,
       customer_name,
       customer_phone,
+      customer_location_id,
+      customer_address,
+      route_area,
+      route_notes,
       sales_rep_id,
+      order_workflow_type,
       total_amount,
       notes,
       items,
@@ -780,8 +921,12 @@ const createOrder = async (req, res) => {
 
     const normalizedCustomerName = normalizeText(customer_name);
     const normalizedCustomerPhone = normalizeText(customer_phone);
+    const normalizedCustomerAddress = normalizeText(customer_address);
+    const normalizedRouteArea = normalizeText(route_area);
+    const normalizedRouteNotes = normalizeText(route_notes);
     const normalizedNotes = normalizeText(notes);
     const normalizedDueDate = due_date && due_date !== '' ? due_date : null;
+    const requestedWorkflowType = normalizeWorkflowType(order_workflow_type);
 
     if (!normalizedCustomerName || !normalizedCustomerPhone) {
       return handleError(res, 400, 'customer_name and customer_phone are required');
@@ -802,6 +947,29 @@ const createOrder = async (req, res) => {
 
     if (!Number.isFinite(submittedAmountPaid) || submittedAmountPaid < 0) {
       return handleError(res, 400, 'amount_paid must be a valid non-negative number');
+    }
+
+    if (order_workflow_type && !requestedWorkflowType) {
+      return handleError(
+        res,
+        400,
+        'order_workflow_type must be one of: normal_self_service, route_self_service, route_sales_rep_capture'
+      );
+    }
+
+    if (requestedWorkflowType === 'normal_self_service' && normalizedOrderType !== 'normal') {
+      return handleError(res, 400, 'normal_self_service workflow is only valid for normal orders');
+    }
+
+    if (
+      (requestedWorkflowType === 'route_self_service' || requestedWorkflowType === 'route_sales_rep_capture') &&
+      normalizedOrderType !== 'route'
+    ) {
+      return handleError(res, 400, 'Route workflows are only valid for route orders');
+    }
+
+    if (requestedWorkflowType === 'route_sales_rep_capture' && !sales_rep_id) {
+      return handleError(res, 400, 'sales_rep_id is required for route_sales_rep_capture workflow');
     }
 
     if (customer_id) {
@@ -827,6 +995,20 @@ const createOrder = async (req, res) => {
     }
 
     await client.query('BEGIN');
+
+    let resolvedCustomerId = customer_id || null;
+    if (normalizedOrderType === 'route') {
+      resolvedCustomerId = await resolveRouteCustomerForOrder(client, {
+        customerId: customer_id || null,
+        customerName: normalizedCustomerName,
+        customerPhone: normalizedCustomerPhone,
+        salesRepId: sales_rep_id || null,
+        locationId: customer_location_id || null,
+        address: normalizedCustomerAddress,
+        routeArea: normalizedRouteArea,
+        routeNotes: normalizedRouteNotes,
+      });
+    }
 
     // Validate items and collect product IDs
     const rawItems = [];
@@ -944,6 +1126,13 @@ const createOrder = async (req, res) => {
     const initialLastPaymentDate =
       submittedAmountPaid > 0 ? new Date().toISOString() : null;
 
+    const inferredWorkflowType =
+      normalizedOrderType === 'route'
+        ? (sales_rep_id ? 'route_sales_rep_capture' : 'route_self_service')
+        : 'normal_self_service';
+
+    const finalWorkflowType = requestedWorkflowType || inferredWorkflowType;
+
     const orderNum = generateOrderNumber();
 
     const orderResult = await client.query(
@@ -956,6 +1145,7 @@ const createOrder = async (req, res) => {
         customer_name,
         customer_phone,
         sales_rep_id,
+        order_workflow_type,
         total_amount,
         amount_paid,
         due_date,
@@ -965,16 +1155,17 @@ const createOrder = async (req, res) => {
         payment_state,
         is_printed
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, FALSE)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, FALSE)
       RETURNING *
       `,
       [
         orderNum,
         normalizedOrderType,
-        customer_id || null,
+        resolvedCustomerId,
         normalizedCustomerName,
         normalizedCustomerPhone,
         sales_rep_id || null,
+        finalWorkflowType,
         finalTotalAmount,
         roundMoney(submittedAmountPaid),
         normalizedDueDate,

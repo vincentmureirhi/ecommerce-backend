@@ -166,9 +166,12 @@ const createCustomer = async (req, res) => {
       name,
       email,
       phone,
+      address,
       customer_type,
       location_id,
       sales_rep_id,
+      route_area,
+      route_notes,
       is_active,
     } = req.body;
 
@@ -186,21 +189,27 @@ const createCustomer = async (req, res) => {
         name,
         email,
         phone,
+        address,
         customer_type,
         location_id,
         sales_rep_id,
+        route_area,
+        route_notes,
         is_active
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING id
       `,
       [
         String(name).trim(),
         email ? String(email).trim() : null,
         phone ? String(phone).trim() : null,
+        address ? String(address).trim() : null,
         customer_type ? String(customer_type).trim() : 'normal',
         location_id || null,
         sales_rep_id || null,
+        route_area ? String(route_area).trim() : null,
+        route_notes ? String(route_notes).trim() : null,
         is_active === undefined ? true : Boolean(is_active),
       ]
     );
@@ -229,9 +238,12 @@ const updateCustomer = async (req, res) => {
       name,
       email,
       phone,
+      address,
       customer_type,
       location_id,
       sales_rep_id,
+      route_area,
+      route_notes,
       is_active,
     } = req.body;
 
@@ -250,20 +262,26 @@ const updateCustomer = async (req, res) => {
         name = COALESCE($1, name),
         email = $2,
         phone = $3,
-        customer_type = COALESCE($4, customer_type),
-        location_id = $5,
-        sales_rep_id = $6,
-        is_active = COALESCE($7, is_active),
+        address = $4,
+        customer_type = COALESCE($5, customer_type),
+        location_id = $6,
+        sales_rep_id = $7,
+        route_area = $8,
+        route_notes = $9,
+        is_active = COALESCE($10, is_active),
         updated_at = CURRENT_TIMESTAMP
-      WHERE id = $8
+      WHERE id = $11
       `,
       [
         name ? String(name).trim() : null,
         email === undefined ? exists.email : (email ? String(email).trim() : null),
         phone === undefined ? exists.phone : (phone ? String(phone).trim() : null),
+        address === undefined ? exists.address : (address ? String(address).trim() : null),
         customer_type ? String(customer_type).trim() : null,
         location_id === undefined ? exists.location_id : (location_id || null),
         sales_rep_id === undefined ? exists.sales_rep_id : (sales_rep_id || null),
+        route_area === undefined ? exists.route_area : (route_area ? String(route_area).trim() : null),
+        route_notes === undefined ? exists.route_notes : (route_notes ? String(route_notes).trim() : null),
         is_active === undefined ? null : Boolean(is_active),
         id,
       ]
@@ -508,6 +526,169 @@ const getCustomerPayments = async (req, res) => {
   }
 };
 
+const upsertRouteCustomer = async (req, res) => {
+  try {
+    const {
+      customer_id,
+      name,
+      email,
+      phone,
+      address,
+      location_id,
+      sales_rep_id,
+      route_area,
+      route_notes,
+      is_active,
+    } = req.body;
+
+    const normalizedName = String(name || '').trim();
+    const normalizedPhone = String(phone || '').trim();
+
+    if (!normalizedName) {
+      return res.status(400).json({
+        success: false,
+        message: 'Customer name is required',
+      });
+    }
+
+    if (!normalizedPhone) {
+      return res.status(400).json({
+        success: false,
+        message: 'Customer phone is required',
+      });
+    }
+
+    let targetCustomerId = customer_id || null;
+
+    if (targetCustomerId) {
+      const existingById = await pool.query(
+        `
+        SELECT id, customer_type
+        FROM customers
+        WHERE id = $1
+        `,
+        [targetCustomerId]
+      );
+
+      if (existingById.rows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: 'Customer not found',
+        });
+      }
+
+      if (existingById.rows[0].customer_type !== 'route') {
+        return res.status(400).json({
+          success: false,
+          message: 'Selected customer must be a route customer',
+        });
+      }
+    } else {
+      const existingByPhone = await pool.query(
+        `
+        SELECT id
+        FROM customers
+        WHERE customer_type = 'route'
+          AND phone = $1
+        ORDER BY id ASC
+        LIMIT 1
+        `,
+        [normalizedPhone]
+      );
+      targetCustomerId = existingByPhone.rows[0]?.id || null;
+    }
+
+    let operation = 'updated';
+
+    if (targetCustomerId) {
+      await pool.query(
+        `
+        UPDATE customers
+        SET
+          name = $1,
+          email = $2,
+          phone = $3,
+          address = $4,
+          customer_type = 'route',
+          location_id = $5,
+          sales_rep_id = $6,
+          route_area = $7,
+          route_notes = $8,
+          is_active = COALESCE($9, is_active),
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = $10
+        `,
+        [
+          normalizedName,
+          email ? String(email).trim() : null,
+          normalizedPhone,
+          address ? String(address).trim() : null,
+          location_id || null,
+          sales_rep_id || null,
+          route_area ? String(route_area).trim() : null,
+          route_notes ? String(route_notes).trim() : null,
+          is_active === undefined ? null : Boolean(is_active),
+          targetCustomerId,
+        ]
+      );
+    } else {
+      operation = 'created';
+      const insertResult = await pool.query(
+        `
+        INSERT INTO customers
+        (
+          name,
+          email,
+          phone,
+          address,
+          customer_type,
+          location_id,
+          sales_rep_id,
+          route_area,
+          route_notes,
+          is_active,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, 'route', $5, $6, $7, $8, COALESCE($9, TRUE), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        RETURNING id
+        `,
+        [
+          normalizedName,
+          email ? String(email).trim() : null,
+          normalizedPhone,
+          address ? String(address).trim() : null,
+          location_id || null,
+          sales_rep_id || null,
+          route_area ? String(route_area).trim() : null,
+          route_notes ? String(route_notes).trim() : null,
+          is_active === undefined ? null : Boolean(is_active),
+        ]
+      );
+
+      targetCustomerId = insertResult.rows[0].id;
+    }
+
+    const customer = await fetchCustomerById(targetCustomerId);
+
+    return res.status(operation === 'created' ? 201 : 200).json({
+      success: true,
+      data: customer,
+      operation,
+      message: operation === 'created'
+        ? 'Route customer created successfully'
+        : 'Route customer updated successfully',
+    });
+  } catch (err) {
+    console.error('❌ upsertRouteCustomer error:', err.message);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to save route customer',
+      error: err.message,
+    });
+  }
+};
+
 module.exports = {
   getAllCustomers,
   getCustomerById,
@@ -517,4 +698,5 @@ module.exports = {
   getCustomerSummary,
   getCustomerOrders,
   getCustomerPayments,
+  upsertRouteCustomer,
 };
