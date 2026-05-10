@@ -19,7 +19,7 @@ const evaluatePricing = async (req, res) => {
     client = await pool.connect();
 
     const productIds = rawItems.map((item) => item.product_id);
-    const { productMap, tiersMap } = await loadPricingContext(client, productIds);
+    const { productMap, tiersMap, ruleTiersMap } = await loadPricingContext(client, productIds);
 
     for (const item of rawItems) {
       if (!productMap[item.product_id]) {
@@ -27,7 +27,7 @@ const evaluatePricing = async (req, res) => {
       }
     }
 
-    const evaluatedItems = evaluateCartPricingWithMeta(rawItems, productMap, tiersMap);
+    const evaluatedItems = evaluateCartPricingWithMeta(rawItems, productMap, tiersMap, ruleTiersMap);
     return handleSuccess(res, 200, 'Pricing evaluated successfully', mapPricingEvaluationItems(evaluatedItems));
   } catch (err) {
     if (err instanceof PricingEvaluationValidationError) {

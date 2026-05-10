@@ -486,4 +486,293 @@ const { RULE_TYPES, resolveItemPricing, evaluateCartPricing, evaluateCartPricing
   assert.strictEqual(result[0].price_source, 'rule:SKU_THRESHOLD:wholesale');
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// resolveItemPricing — FIXED_UNIT rule
+// ─────────────────────────────────────────────────────────────────────────────
+
+// FIXED_UNIT: always returns retail price (fixed unit price)
+{
+  const product = { retail_price: '200', wholesale_price: '120', min_qty_wholesale: 5, requires_manual_price: false };
+  const rule = { id: 70, rule_type: RULE_TYPES.FIXED_UNIT, threshold_qty: null };
+  const { unitPrice, priceSource } = resolveItemPricing(product, 100, [], rule);
+  assert.strictEqual(unitPrice.toFixed(2), '200.00');
+  assert.strictEqual(priceSource, 'rule:FIXED_UNIT');
+}
+
+// FIXED_UNIT: tiers and wholesale are ignored
+{
+  const product = { retail_price: '50', wholesale_price: '30', min_qty_wholesale: 1, requires_manual_price: false };
+  const tiers = [{ min_qty: 1, max_qty: null, unit_price: '20' }];
+  const rule = { id: 71, rule_type: RULE_TYPES.FIXED_UNIT, threshold_qty: null };
+  const { unitPrice, priceSource } = resolveItemPricing(product, 50, tiers, rule);
+  assert.strictEqual(unitPrice.toFixed(2), '50.00', 'FIXED_UNIT ignores tiers and wholesale');
+  assert.strictEqual(priceSource, 'rule:FIXED_UNIT');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// resolveItemPricing — SKU_TIERED rule
+// ─────────────────────────────────────────────────────────────────────────────
+
+// SKU_TIERED: qty matches a rule tier
+{
+  const product = { retail_price: '60', wholesale_price: '40', min_qty_wholesale: 10, requires_manual_price: false };
+  const ruleTiers = [
+    { min_qty: 1,   max_qty: 11,  unit_price: '60' },
+    { min_qty: 12,  max_qty: 99,  unit_price: '43' },
+    { min_qty: 100, max_qty: null, unit_price: '42' },
+  ];
+  const rule = { id: 80, rule_type: RULE_TYPES.SKU_TIERED, threshold_qty: null };
+  const { unitPrice, priceSource } = resolveItemPricing(product, 12, [], rule, ruleTiers);
+  assert.strictEqual(unitPrice.toFixed(2), '43.00', 'SKU_TIERED: 12 in 12-99 band → 43');
+  assert.strictEqual(priceSource, 'rule:SKU_TIERED:tier');
+}
+
+// SKU_TIERED: high qty hits the open-ended top tier
+{
+  const product = { retail_price: '60', wholesale_price: '40', min_qty_wholesale: 10, requires_manual_price: false };
+  const ruleTiers = [
+    { min_qty: 1,   max_qty: 11,  unit_price: '60' },
+    { min_qty: 12,  max_qty: 99,  unit_price: '43' },
+    { min_qty: 100, max_qty: null, unit_price: '42' },
+  ];
+  const rule = { id: 80, rule_type: RULE_TYPES.SKU_TIERED, threshold_qty: null };
+  const { unitPrice, priceSource } = resolveItemPricing(product, 200, [], rule, ruleTiers);
+  assert.strictEqual(unitPrice.toFixed(2), '42.00', 'SKU_TIERED: 200 in 100+ band → 42');
+  assert.strictEqual(priceSource, 'rule:SKU_TIERED:tier');
+}
+
+// SKU_TIERED: no tier match → retail fallback
+{
+  const product = { retail_price: '60', wholesale_price: '40', min_qty_wholesale: 10, requires_manual_price: false };
+  const rule = { id: 81, rule_type: RULE_TYPES.SKU_TIERED, threshold_qty: null };
+  const { unitPrice, priceSource } = resolveItemPricing(product, 5, [], rule, []);
+  assert.strictEqual(unitPrice.toFixed(2), '60.00', 'SKU_TIERED: no tiers → retail');
+  assert.strictEqual(priceSource, 'rule:SKU_TIERED:retail');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// resolveItemPricing — GROUP_TIERED rule
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GROUP_TIERED: group qty matches a tier (qty is pre-computed group total)
+{
+  const product = { retail_price: '60', wholesale_price: '40', min_qty_wholesale: 10, requires_manual_price: false };
+  const ruleTiers = [
+    { min_qty: 1,   max_qty: 5,   unit_price: '60' },
+    { min_qty: 6,   max_qty: null, unit_price: '45' },
+  ];
+  const rule = { id: 90, rule_type: RULE_TYPES.GROUP_TIERED, threshold_qty: null };
+  // Caller passes group total (8) as qty
+  const { unitPrice, priceSource } = resolveItemPricing(product, 8, [], rule, ruleTiers);
+  assert.strictEqual(unitPrice.toFixed(2), '45.00', 'GROUP_TIERED: group total 8 in 6+ band → 45');
+  assert.strictEqual(priceSource, 'rule:GROUP_TIERED:tier');
+}
+
+// GROUP_TIERED: group qty below lowest tier → retail
+{
+  const product = { retail_price: '60', wholesale_price: '40', min_qty_wholesale: 10, requires_manual_price: false };
+  const ruleTiers = [
+    { min_qty: 3, max_qty: null, unit_price: '45' },
+  ];
+  const rule = { id: 91, rule_type: RULE_TYPES.GROUP_TIERED, threshold_qty: null };
+  const { unitPrice, priceSource } = resolveItemPricing(product, 2, [], rule, ruleTiers);
+  assert.strictEqual(unitPrice.toFixed(2), '60.00', 'GROUP_TIERED: group total 2 < min tier 3 → retail');
+  assert.strictEqual(priceSource, 'rule:GROUP_TIERED:retail');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// evaluateCartPricingWithMeta — SKU_TIERED with ruleTiersMap
+// ─────────────────────────────────────────────────────────────────────────────
+
+{
+  const rule = { id: 80, rule_type: RULE_TYPES.SKU_TIERED, threshold_qty: null, name: 'SKU tiers' };
+  const product = {
+    id: 200,
+    retail_price: '60', wholesale_price: '40', min_qty_wholesale: 10,
+    requires_manual_price: false,
+    _pricingRule: rule,
+    _pricingGroupId: null,
+  };
+  const items = [{ product_id: 200, quantity: 12 }];
+  const productMap = { 200: product };
+  const tiersMap = {};
+  const ruleTiersMap = {
+    80: [
+      { min_qty: 1,   max_qty: 11,  unit_price: '60' },
+      { min_qty: 12,  max_qty: 99,  unit_price: '43' },
+      { min_qty: 100, max_qty: null, unit_price: '42' },
+    ],
+  };
+
+  const result = evaluateCartPricingWithMeta(items, productMap, tiersMap, ruleTiersMap);
+
+  assert.strictEqual(result[0].unit_price.toFixed(2), '43.00', 'SKU_TIERED via evaluateCartPricingWithMeta');
+  assert.strictEqual(result[0].price_source, 'rule:SKU_TIERED:tier');
+  assert.strictEqual(result[0].pricing_label, `tier (${RULE_TYPES.SKU_TIERED})`);
+  assert.strictEqual(result[0].effective_qty, 12, 'effective_qty is individual qty for SKU_TIERED');
+  assert.strictEqual(result[0].rule_type, RULE_TYPES.SKU_TIERED);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// evaluateCartPricingWithMeta — GROUP_TIERED with explicit pricing group
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Two products share an explicit pricing group; combined qty selects tier for both
+{
+  const rule = { id: 90, rule_type: RULE_TYPES.GROUP_TIERED, threshold_qty: null, name: 'Group tiers', pricing_group_id: 5 };
+  const productA = {
+    id: 201,
+    retail_price: '60', wholesale_price: '40', min_qty_wholesale: 10,
+    requires_manual_price: false,
+    _pricingRule: rule,
+    _pricingGroupId: 5,
+  };
+  const productB = {
+    id: 202,
+    retail_price: '55', wholesale_price: '38', min_qty_wholesale: 10,
+    requires_manual_price: false,
+    _pricingRule: rule,
+    _pricingGroupId: 5,
+  };
+  const items = [
+    { product_id: 201, quantity: 3 },
+    { product_id: 202, quantity: 4 },
+  ];
+  const productMap = { 201: productA, 202: productB };
+  const tiersMap = {};
+  const ruleTiersMap = {
+    90: [
+      { min_qty: 1,  max_qty: 5,   unit_price: '60' },
+      { min_qty: 6,  max_qty: null, unit_price: '45' },
+    ],
+  };
+
+  const result = evaluateCartPricingWithMeta(items, productMap, tiersMap, ruleTiersMap);
+
+  // Combined group qty = 7 → 6+ band → price 45 for productA and productB
+  assert.strictEqual(result[0].effective_qty, 7, 'GROUP_TIERED: group total 3+4=7');
+  assert.strictEqual(result[0].unit_price.toFixed(2), '45.00', 'productA gets tier price 45');
+  assert.strictEqual(result[0].price_source, 'rule:GROUP_TIERED:tier');
+  assert.strictEqual(result[1].effective_qty, 7);
+  assert.strictEqual(result[1].unit_price.toFixed(2), '45.00', 'productB gets tier price 45');
+  assert.strictEqual(result[0].pricing_group_id, 5);
+}
+
+// GROUP_TIERED: group total below lowest tier → retail for all members
+{
+  const rule = { id: 91, rule_type: RULE_TYPES.GROUP_TIERED, threshold_qty: null, name: 'Group tiers v2', pricing_group_id: 6 };
+  const productA = {
+    id: 203,
+    retail_price: '60', wholesale_price: '40', min_qty_wholesale: 10,
+    requires_manual_price: false,
+    _pricingRule: rule,
+    _pricingGroupId: 6,
+  };
+  const items = [{ product_id: 203, quantity: 2 }];
+  const productMap = { 203: productA };
+  const tiersMap = {};
+  const ruleTiersMap = {
+    91: [{ min_qty: 6, max_qty: null, unit_price: '45' }],
+  };
+
+  const result = evaluateCartPricingWithMeta(items, productMap, tiersMap, ruleTiersMap);
+
+  assert.strictEqual(result[0].effective_qty, 2, 'GROUP_TIERED: only one item in group');
+  assert.strictEqual(result[0].unit_price.toFixed(2), '60.00', 'group qty 2 < tier min 6 → retail');
+  assert.strictEqual(result[0].price_source, 'rule:GROUP_TIERED:retail');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// evaluateCartPricingWithMeta — GROUP_THRESHOLD with explicit _pricingGroupId
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Products share an explicit pricing group (different from implicit rule.id grouping).
+// A product without the group should NOT affect the group total.
+{
+  const rule = { id: 100, rule_type: RULE_TYPES.GROUP_THRESHOLD, threshold_qty: 6, name: 'Explicit group', pricing_group_id: 10 };
+  const productA = {
+    id: 210,
+    retail_price: '100', wholesale_price: '70', min_qty_wholesale: 6,
+    requires_manual_price: false,
+    _pricingRule: rule,
+    _pricingGroupId: 10,
+  };
+  const productB = {
+    id: 211,
+    retail_price: '80', wholesale_price: '55', min_qty_wholesale: 6,
+    requires_manual_price: false,
+    _pricingRule: rule,
+    _pricingGroupId: 10,
+  };
+  // productC has the same rule but a different group → should NOT count
+  const ruleC = { id: 101, rule_type: RULE_TYPES.GROUP_THRESHOLD, threshold_qty: 6, name: 'Other group', pricing_group_id: 11 };
+  const productC = {
+    id: 212,
+    retail_price: '90', wholesale_price: '60', min_qty_wholesale: 6,
+    requires_manual_price: false,
+    _pricingRule: ruleC,
+    _pricingGroupId: 11,
+  };
+
+  const items = [
+    { product_id: 210, quantity: 3 },
+    { product_id: 211, quantity: 3 },
+    { product_id: 212, quantity: 10 },
+  ];
+  const productMap = { 210: productA, 211: productB, 212: productC };
+  const tiersMap = {};
+
+  const result = evaluateCartPricingWithMeta(items, productMap, tiersMap);
+
+  // Group 10 total = 3+3 = 6, meets threshold → wholesale
+  assert.strictEqual(result[0].effective_qty, 6, 'Group 10: total qty = 6');
+  assert.strictEqual(result[0].unit_price.toFixed(2), '70.00', 'productA gets wholesale');
+  assert.strictEqual(result[1].effective_qty, 6, 'Group 10: total qty = 6');
+  assert.strictEqual(result[1].unit_price.toFixed(2), '55.00', 'productB gets wholesale');
+  // Group 11 total = 10 → meets threshold independently
+  assert.strictEqual(result[2].effective_qty, 10, 'Group 11: only productC');
+  assert.strictEqual(result[2].unit_price.toFixed(2), '60.00', 'productC gets wholesale from its own group');
+}
+
+// FIXED_UNIT: is_wholesale_eligible is always false, pricing_label is 'fixed'
+{
+  const product = {
+    id: 220,
+    retail_price: '150', wholesale_price: '90', min_qty_wholesale: 1,
+    requires_manual_price: false,
+    _pricingRule: { id: 110, rule_type: RULE_TYPES.FIXED_UNIT, threshold_qty: null, name: 'Fixed' },
+    _pricingGroupId: null,
+  };
+  const items = [{ product_id: 220, quantity: 100 }];
+  const productMap = { 220: product };
+
+  const result = evaluateCartPricingWithMeta(items, productMap, {});
+
+  assert.strictEqual(result[0].is_wholesale_eligible, false, 'FIXED_UNIT never grants wholesale');
+  assert.strictEqual(result[0].threshold_qty, null, 'FIXED_UNIT has no threshold');
+  assert.strictEqual(result[0].unit_price.toFixed(2), '150.00');
+  assert.strictEqual(result[0].pricing_label, 'fixed');
+  assert.strictEqual(result[0].rule_type, RULE_TYPES.FIXED_UNIT);
+}
+
+// evaluateCartPricingWithMeta returns pricing_group_id and pricing_group_name
+{
+  const rule = { id: 120, rule_type: RULE_TYPES.GROUP_THRESHOLD, threshold_qty: 3, name: 'Grp', pricing_group_id: 20 };
+  const product = {
+    id: 230,
+    retail_price: '100', wholesale_price: '70', min_qty_wholesale: 3,
+    requires_manual_price: false,
+    _pricingRule: rule,
+    _pricingGroupId: 20,
+    _pricingGroupName: 'Test Group',
+  };
+  const items = [{ product_id: 230, quantity: 5 }];
+  const productMap = { 230: product };
+
+  const result = evaluateCartPricingWithMeta(items, productMap, {});
+
+  assert.strictEqual(result[0].pricing_group_id, 20, 'pricing_group_id is exposed');
+  assert.strictEqual(result[0].pricing_group_name, 'Test Group', 'pricing_group_name is exposed');
+}
+
 console.log('pricingRuleEvaluator tests passed');
