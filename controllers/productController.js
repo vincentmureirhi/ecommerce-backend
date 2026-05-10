@@ -24,6 +24,27 @@ function toMoney(v, field, { allowNull = false } = {}) {
   return d.toDecimalPlaces(2);
 }
 
+function buildAutoSkuThresholdRuleName(productName) {
+  return `Wholesale threshold - ${productName}`;
+}
+
+async function createAutoSkuThresholdRule(client, productName, minQtyWholesale) {
+  const ruleName = buildAutoSkuThresholdRuleName(productName);
+  const r = await client.query(
+    `
+    INSERT INTO pricing_rules (name, description, rule_type, threshold_qty, is_active)
+    VALUES ($1, $2, 'SKU_THRESHOLD', $3, TRUE)
+    RETURNING id
+    `,
+    [
+      ruleName,
+      `Auto-generated wholesale threshold rule for ${productName}`,
+      minQtyWholesale,
+    ]
+  );
+  return r.rows[0].id;
+}
+
 const getAllProducts = async (req, res) => {
   try {
     const r = await pool.query(`
@@ -148,6 +169,7 @@ const getProductById = async (req, res) => {
 };
 
 const createProduct = async (req, res) => {
+  let client;
   try {
     const name = String(req.body.name || "").trim();
     const sku = String(req.body.sku || "").trim();
@@ -180,7 +202,17 @@ const createProduct = async (req, res) => {
       min_qty_wholesale = toInt(req.body.min_qty_wholesale, "min_qty_wholesale", { allowNull: true });
     }
 
-    const r = await pool.query(
+    const hasWholesaleConfig = wholesale_price != null && min_qty_wholesale != null;
+
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    let linkedPricingRuleId = pricing_rule_id;
+    if (linkedPricingRuleId == null && hasWholesaleConfig) {
+      linkedPricingRuleId = await createAutoSkuThresholdRule(client, name, min_qty_wholesale);
+    }
+
+    const r = await client.query(
       `
       INSERT INTO products (
         name, sku, category_id, department_id,
@@ -203,17 +235,27 @@ const createProduct = async (req, res) => {
         min_qty_wholesale,
         requires_manual_price,
         image_url,
-        pricing_rule_id,
+        linkedPricingRuleId,
       ]
     );
 
+    await client.query("COMMIT");
+
     return handleSuccess(res, 201, "Product created", r.rows[0]);
   } catch (err) {
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (_) {}
+    }
     return handleError(res, 500, "Failed to create product", err);
+  } finally {
+    if (client) client.release();
   }
 };
 
 const updateProduct = async (req, res) => {
+  let client;
   try {
     const id = toInt(req.params.id, "id");
 
@@ -230,11 +272,10 @@ const updateProduct = async (req, res) => {
     const image_url = req.body.image_url ? String(req.body.image_url).trim() : null;
     const cost_price = toMoney(req.body.cost_price, "cost_price", { allowNull: true });
 
-    const pricing_rule_id = toInt(
-      req.body.pricing_rule_id,
-      "pricing_rule_id",
-      { allowNull: true }
-    );
+    const hasExplicitPricingRuleId = Object.prototype.hasOwnProperty.call(req.body, "pricing_rule_id");
+    const explicitPricingRuleId = hasExplicitPricingRuleId
+      ? toInt(req.body.pricing_rule_id, "pricing_rule_id", { allowNull: true })
+      : null;
 
     let retail_price = null;
     let wholesale_price = null;
@@ -246,7 +287,51 @@ const updateProduct = async (req, res) => {
       min_qty_wholesale = toInt(req.body.min_qty_wholesale, "min_qty_wholesale", { allowNull: true });
     }
 
-    const r = await pool.query(
+    const hasWholesaleConfig = wholesale_price != null && min_qty_wholesale != null;
+
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    const existingProduct = await client.query(
+      `SELECT pricing_rule_id FROM products WHERE id = $1 FOR UPDATE`,
+      [id]
+    );
+    if (existingProduct.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return handleError(res, 404, "Product not found");
+    }
+
+    let linkedPricingRuleId = hasExplicitPricingRuleId
+      ? explicitPricingRuleId
+      : existingProduct.rows[0].pricing_rule_id;
+
+    if (!hasExplicitPricingRuleId && hasWholesaleConfig) {
+      if (linkedPricingRuleId == null) {
+        linkedPricingRuleId = await createAutoSkuThresholdRule(client, name, min_qty_wholesale);
+      } else {
+        const linkedRule = await client.query(
+          `SELECT id, rule_type FROM pricing_rules WHERE id = $1 FOR UPDATE`,
+          [linkedPricingRuleId]
+        );
+
+        if (linkedRule.rowCount > 0 && linkedRule.rows[0].rule_type === "SKU_THRESHOLD") {
+          await client.query(
+            `
+            UPDATE pricing_rules
+            SET name = $1, threshold_qty = $2, updated_at = NOW()
+            WHERE id = $3
+            `,
+            [
+              buildAutoSkuThresholdRuleName(name),
+              min_qty_wholesale,
+              linkedPricingRuleId,
+            ]
+          );
+        }
+      }
+    }
+
+    const r = await client.query(
       `
       UPDATE products
       SET
@@ -277,15 +362,23 @@ const updateProduct = async (req, res) => {
         min_qty_wholesale,
         requires_manual_price,
         image_url,
-        pricing_rule_id,
+        linkedPricingRuleId,
         id,
       ]
     );
 
-    if (r.rowCount === 0) return handleError(res, 404, "Product not found");
+    await client.query("COMMIT");
+
     return handleSuccess(res, 200, "Product updated", r.rows[0]);
   } catch (err) {
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (_) {}
+    }
     return handleError(res, 500, "Failed to update product", err);
+  } finally {
+    if (client) client.release();
   }
 };
 
