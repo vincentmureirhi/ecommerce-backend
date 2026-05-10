@@ -11,9 +11,13 @@ class PricingEvaluationValidationError extends Error {
 }
 
 function roundMoney(value) {
-  const amount = Number(value);
-  if (!Number.isFinite(amount)) return null;
-  return Number(amount.toFixed(2));
+  if (value == null) return null;
+
+  try {
+    return new Decimal(value).toDecimalPlaces(2).toNumber();
+  } catch {
+    return null;
+  }
 }
 
 function normalizeUnitPrice(unitPrice) {
@@ -22,7 +26,7 @@ function normalizeUnitPrice(unitPrice) {
   const amount =
     unitPrice instanceof Decimal
       ? unitPrice
-      : new Decimal(typeof unitPrice.toFixed === 'function' ? unitPrice.toFixed(2) : unitPrice);
+      : new Decimal(unitPrice);
 
   return roundMoney(amount.toNumber());
 }
@@ -55,7 +59,7 @@ function mapPricingEvaluationItems(evaluatedItems) {
     const unitPrice = normalizeUnitPrice(item.unit_price);
     const lineTotal =
       unitPrice != null
-        ? roundMoney(new Decimal(item.unit_price).mul(Number(item.quantity || 0)).toNumber())
+        ? roundMoney(new Decimal(unitPrice).mul(Number(item.quantity || 0)))
         : null;
 
     return {
