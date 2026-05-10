@@ -39,6 +39,7 @@ const flashSalesRoutes = require('./routes/flashSales');
 const blogRoutes = require('./routes/blog');
 const pricingRoutes = require('./routes/pricing');
 const pricingRulesRoutes = require('./routes/pricingRules');
+const pricingGroupsRoutes = require('./routes/pricingGroups');
 
 const app = express();
 
@@ -109,6 +110,7 @@ app.use('/api/flash-sales', flashSalesRoutes);
 app.use('/api/blog', blogRoutes);
 app.use('/api/pricing', pricingRoutes);
 app.use('/api/pricing-rules', pricingRulesRoutes);
+app.use('/api/pricing-groups', pricingGroupsRoutes);
 
 // ===== 404 =====
 app.use((req, res) => {

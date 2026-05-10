@@ -149,12 +149,17 @@ async function fetchValidatedProduct(client, productId) {
 
 
 /**
- * Batch-fetch products with their active pricing rule and price tiers.
- * Returns { productMap, tiersMap } keyed by product id.
+ * Batch-fetch products with their active pricing rule, price tiers, rule-level
+ * tiers, and explicit pricing group memberships.
+ *
+ * Returns:
+ *   productMap    — { [product_id]: productRow }  (with _pricingRule, _pricingGroupId)
+ *   tiersMap      — { [product_id]: tierRow[] }   (product_price_tiers)
+ *   ruleTiersMap  — { [rule_id]: tierRow[] }       (pricing_rule_tiers)
  */
 async function loadPricingContext(client, productIds) {
   if (!productIds || productIds.length === 0) {
-    return { productMap: {}, tiersMap: {} };
+    return { productMap: {}, tiersMap: {}, ruleTiersMap: {} };
   }
 
   const productResult = await client.query(
@@ -163,9 +168,10 @@ async function loadPricingContext(client, productIds) {
       p.id, p.name, p.sku,
       p.retail_price, p.wholesale_price, p.min_qty_wholesale,
       p.requires_manual_price, p.current_stock, p.pricing_rule_id,
-      pr.rule_type  AS pricing_rule_type,
-      pr.threshold_qty AS pricing_rule_threshold_qty,
-      pr.name       AS pricing_rule_name
+      pr.rule_type      AS pricing_rule_type,
+      pr.threshold_qty  AS pricing_rule_threshold_qty,
+      pr.name           AS pricing_rule_name,
+      pr.pricing_group_id AS pricing_rule_group_id
     FROM products p
     LEFT JOIN pricing_rules pr
       ON pr.id = p.pricing_rule_id AND pr.is_active = TRUE
@@ -175,6 +181,8 @@ async function loadPricingContext(client, productIds) {
   );
 
   const productMap = {};
+  const ruleIds = new Set();
+
   for (const row of productResult.rows) {
     productMap[row.id] = {
       ...row,
@@ -185,11 +193,16 @@ async function loadPricingContext(client, productIds) {
               rule_type: row.pricing_rule_type,
               threshold_qty: row.pricing_rule_threshold_qty,
               name: row.pricing_rule_name,
+              pricing_group_id: row.pricing_rule_group_id || null,
             }
           : null,
+      _pricingGroupId: null,
+      _pricingGroupName: null,
     };
+    if (row.pricing_rule_id != null) ruleIds.add(row.pricing_rule_id);
   }
 
+  // ── Product-level tiers (product_price_tiers, used by legacy TIERED rule) ─
   const tiersResult = await client.query(
     `
     SELECT product_id, min_qty, max_qty, unit_price
@@ -206,7 +219,96 @@ async function loadPricingContext(client, productIds) {
     tiersMap[tier.product_id].push(tier);
   }
 
-  return { productMap, tiersMap };
+  // ── Rule-level tiers (pricing_rule_tiers, used by SKU_TIERED / GROUP_TIERED) ─
+  const ruleTiersMap = {};
+  if (ruleIds.size > 0) {
+    const ruleTiersResult = await client.query(
+      `
+      SELECT pricing_rule_id, min_qty, max_qty, unit_price
+      FROM pricing_rule_tiers
+      WHERE pricing_rule_id = ANY($1)
+      ORDER BY pricing_rule_id, min_qty
+      `,
+      [Array.from(ruleIds)]
+    );
+    for (const tier of ruleTiersResult.rows) {
+      if (!ruleTiersMap[tier.pricing_rule_id]) ruleTiersMap[tier.pricing_rule_id] = [];
+      ruleTiersMap[tier.pricing_rule_id].push(tier);
+    }
+  }
+
+  // ── Explicit pricing group memberships (pricing_group_products) ───────────
+  // Resolves _pricingGroupId for each product so GROUP_* rules can use the
+  // explicit group for combined quantity evaluation instead of the implicit
+  // shared-rule-id approach.
+  //
+  // Priority:
+  //   1. pricing_rules.pricing_group_id (the rule itself declares its group)
+  //   2. pricing_group_products (explicit membership, for products in a group
+  //      without a direct rule-level group link)
+  for (const pid of productIds) {
+    const prod = productMap[pid];
+    if (!prod) continue;
+    if (prod._pricingRule && prod._pricingRule.pricing_group_id) {
+      prod._pricingGroupId = prod._pricingRule.pricing_group_id;
+    }
+  }
+
+  // Check pricing_group_products for products that don't yet have a group id
+  const productsNeedingGroupLookup = productIds.filter(
+    (pid) => productMap[pid] && productMap[pid]._pricingGroupId == null
+  );
+
+  if (productsNeedingGroupLookup.length > 0) {
+    const groupMemberResult = await client.query(
+      `
+      SELECT pgp.product_id, pgp.pricing_group_id, pg.name AS pricing_group_name
+      FROM pricing_group_products pgp
+      JOIN pricing_groups pg ON pg.id = pgp.pricing_group_id
+      WHERE pgp.product_id = ANY($1)
+        AND pgp.is_active = TRUE
+        AND pg.is_active = TRUE
+        AND (pgp.effective_from IS NULL OR pgp.effective_from <= NOW())
+        AND (pgp.effective_until IS NULL OR pgp.effective_until > NOW())
+      ORDER BY pgp.product_id, pgp.pricing_group_id
+      `,
+      [productsNeedingGroupLookup]
+    );
+
+    for (const row of groupMemberResult.rows) {
+      const prod = productMap[row.product_id];
+      if (prod && prod._pricingGroupId == null) {
+        prod._pricingGroupId = row.pricing_group_id;
+        prod._pricingGroupName = row.pricing_group_name;
+      }
+    }
+  }
+
+  // Set group name for products whose group came from the rule-level group link
+  // (name requires an extra lookup only if we don't already have it)
+  const ruleGroupIds = new Set(
+    Object.values(productMap)
+      .filter((p) => p._pricingGroupName == null && p._pricingGroupId != null)
+      .map((p) => p._pricingGroupId)
+  );
+
+  if (ruleGroupIds.size > 0) {
+    const groupNameResult = await client.query(
+      `SELECT id, name FROM pricing_groups WHERE id = ANY($1)`,
+      [Array.from(ruleGroupIds)]
+    );
+    const groupNames = {};
+    for (const row of groupNameResult.rows) {
+      groupNames[row.id] = row.name;
+    }
+    for (const prod of Object.values(productMap)) {
+      if (prod._pricingGroupId != null && prod._pricingGroupName == null) {
+        prod._pricingGroupName = groupNames[prod._pricingGroupId] || null;
+      }
+    }
+  }
+
+  return { productMap, tiersMap, ruleTiersMap };
 
 }
 
@@ -491,7 +593,7 @@ const guestCheckout = async (req, res) => {
 
     // Batch-load products with pricing rule context and tiers
     const productIds = rawItems.map((i) => i.product_id);
-    const { productMap, tiersMap } = await loadPricingContext(client, productIds);
+    const { productMap, tiersMap, ruleTiersMap } = await loadPricingContext(client, productIds);
 
     for (const item of rawItems) {
       if (!productMap[item.product_id]) {
@@ -503,7 +605,7 @@ const guestCheckout = async (req, res) => {
     // The backend is the sole pricing authority; client-supplied prices are
     // never used for non-manual products.  If the client explicitly requested
     // wholesale pricing, we validate that eligibility is actually met.
-    const evaluatedItems = evaluateCartPricingWithMeta(rawItems, productMap, tiersMap);
+    const evaluatedItems = evaluateCartPricingWithMeta(rawItems, productMap, tiersMap, ruleTiersMap);
 
     // Validate explicit wholesale requests against server-computed eligibility
     for (let i = 0; i < rawItems.length; i++) {
@@ -751,7 +853,7 @@ const createOrder = async (req, res) => {
 
     // Batch-load products with pricing rule context and tiers
     const productIds = rawItems.map((i) => i.product_id);
-    const { productMap, tiersMap } = await loadPricingContext(client, productIds);
+    const { productMap, tiersMap, ruleTiersMap } = await loadPricingContext(client, productIds);
 
     for (const item of rawItems) {
       if (!productMap[item.product_id]) {
@@ -763,7 +865,7 @@ const createOrder = async (req, res) => {
     // The backend is the sole pricing authority; client-supplied prices are
     // never used for non-manual products.  If the client explicitly requested
     // wholesale pricing, we validate that eligibility is actually met.
-    const evaluatedItems = evaluateCartPricingWithMeta(rawItems, productMap, tiersMap);
+    const evaluatedItems = evaluateCartPricingWithMeta(rawItems, productMap, tiersMap, ruleTiersMap);
 
     // Validate explicit wholesale requests against server-computed eligibility
     for (let i = 0; i < rawItems.length; i++) {

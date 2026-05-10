@@ -72,6 +72,9 @@ function mapPricingEvaluationItems(evaluatedItems) {
       threshold_quantity: item.threshold_qty != null ? Number(item.threshold_qty) : null,
       effective_quantity: item.effective_qty != null ? Number(item.effective_qty) : Number(item.quantity || 0),
       rule_type: item.rule_type,
+      rule_name: item.rule_name || null,
+      pricing_group_id: item.pricing_group_id || null,
+      pricing_group_name: item.pricing_group_name || null,
       pricing_label: item.pricing_label,
     };
   });
