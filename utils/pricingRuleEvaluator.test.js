@@ -2,7 +2,7 @@
 
 const assert = require('assert');
 const Decimal = require('decimal.js');
-const { RULE_TYPES, resolveItemPricing, evaluateCartPricing } = require('./pricingRuleEvaluator');
+const { RULE_TYPES, resolveItemPricing, evaluateCartPricing, evaluateCartPricingWithMeta } = require('./pricingRuleEvaluator');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // resolveItemPricing — no rule (legacy fallback)
@@ -269,6 +269,221 @@ const { RULE_TYPES, resolveItemPricing, evaluateCartPricing } = require('./prici
 
   assert.strictEqual(result[0].unit_price.toFixed(2), '100.00');
   assert.strictEqual(result[0].price_source, 'wholesale');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// evaluateCartPricingWithMeta — wholesale threshold enforcement
+// Tests cover the loophole: client requests wholesale below threshold must be
+// detectable (is_wholesale_eligible=false) so the order controller can reject
+// them with HTTP 422.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// SKU_THRESHOLD: qty below threshold → is_wholesale_eligible=false, threshold_qty populated
+{
+  const product = {
+    id: 100,
+    retail_price: '100', wholesale_price: '70', min_qty_wholesale: 3,
+    requires_manual_price: false,
+    _pricingRule: { id: 30, rule_type: RULE_TYPES.SKU_THRESHOLD, threshold_qty: 3, name: 'Min3' },
+  };
+  const items = [{ product_id: 100, quantity: 1 }];
+  const productMap = { 100: product };
+  const tiersMap = {};
+
+  const result = evaluateCartPricingWithMeta(items, productMap, tiersMap);
+
+  assert.strictEqual(result[0].is_wholesale_eligible, false, 'qty 1 < threshold 3 → not eligible');
+  assert.strictEqual(result[0].threshold_qty, 3, 'threshold_qty must be 3');
+  assert.strictEqual(result[0].effective_qty, 1, 'effective_qty is individual qty for SKU_THRESHOLD');
+  assert.strictEqual(result[0].rule_type, RULE_TYPES.SKU_THRESHOLD);
+  assert.strictEqual(result[0].pricing_label, `retail (${RULE_TYPES.SKU_THRESHOLD})`);
+  assert.strictEqual(result[0].unit_price.toFixed(2), '100.00');
+}
+
+// SKU_THRESHOLD: qty at threshold → is_wholesale_eligible=true
+{
+  const product = {
+    id: 101,
+    retail_price: '100', wholesale_price: '70', min_qty_wholesale: 3,
+    requires_manual_price: false,
+    _pricingRule: { id: 31, rule_type: RULE_TYPES.SKU_THRESHOLD, threshold_qty: 3, name: 'Min3' },
+  };
+  const items = [{ product_id: 101, quantity: 3 }];
+  const productMap = { 101: product };
+  const tiersMap = {};
+
+  const result = evaluateCartPricingWithMeta(items, productMap, tiersMap);
+
+  assert.strictEqual(result[0].is_wholesale_eligible, true, 'qty 3 = threshold 3 → eligible');
+  assert.strictEqual(result[0].threshold_qty, 3);
+  assert.strictEqual(result[0].effective_qty, 3);
+  assert.strictEqual(result[0].pricing_label, `wholesale (${RULE_TYPES.SKU_THRESHOLD})`);
+  assert.strictEqual(result[0].unit_price.toFixed(2), '70.00');
+}
+
+// SKU_THRESHOLD: qty above threshold → eligible
+{
+  const product = {
+    id: 102,
+    retail_price: '100', wholesale_price: '70', min_qty_wholesale: 3,
+    requires_manual_price: false,
+    _pricingRule: { id: 32, rule_type: RULE_TYPES.SKU_THRESHOLD, threshold_qty: 3, name: 'Min3' },
+  };
+  const items = [{ product_id: 102, quantity: 5 }];
+  const productMap = { 102: product };
+  const tiersMap = {};
+
+  const result = evaluateCartPricingWithMeta(items, productMap, tiersMap);
+
+  assert.strictEqual(result[0].is_wholesale_eligible, true, 'qty 5 > threshold 3 → eligible');
+  assert.strictEqual(result[0].unit_price.toFixed(2), '70.00');
+}
+
+// GROUP_THRESHOLD: group total below threshold → both items is_wholesale_eligible=false
+{
+  const rule = { id: 40, rule_type: RULE_TYPES.GROUP_THRESHOLD, threshold_qty: 5, name: 'Grp5' };
+  const productA = {
+    id: 103,
+    retail_price: '100', wholesale_price: '70', min_qty_wholesale: 5,
+    requires_manual_price: false,
+    _pricingRule: rule,
+  };
+  const productB = {
+    id: 104,
+    retail_price: '80', wholesale_price: '55', min_qty_wholesale: 5,
+    requires_manual_price: false,
+    _pricingRule: rule,
+  };
+
+  const items = [
+    { product_id: 103, quantity: 1 },
+    { product_id: 104, quantity: 2 },
+  ];
+  const productMap = { 103: productA, 104: productB };
+  const tiersMap = {};
+
+  // Group total = 3, threshold = 5 → below threshold
+  const result = evaluateCartPricingWithMeta(items, productMap, tiersMap);
+
+  assert.strictEqual(result[0].is_wholesale_eligible, false, 'GROUP_THRESHOLD group total 3 < 5 → not eligible');
+  assert.strictEqual(result[0].effective_qty, 3, 'effective_qty is group total for GROUP_THRESHOLD');
+  assert.strictEqual(result[0].threshold_qty, 5);
+  assert.strictEqual(result[0].unit_price.toFixed(2), '100.00');
+  assert.strictEqual(result[1].is_wholesale_eligible, false);
+  assert.strictEqual(result[1].effective_qty, 3);
+  assert.strictEqual(result[1].unit_price.toFixed(2), '80.00');
+}
+
+// GROUP_THRESHOLD: group total at threshold → both items is_wholesale_eligible=true
+{
+  const rule = { id: 41, rule_type: RULE_TYPES.GROUP_THRESHOLD, threshold_qty: 5, name: 'Grp5' };
+  const productA = {
+    id: 105,
+    retail_price: '100', wholesale_price: '70', min_qty_wholesale: 5,
+    requires_manual_price: false,
+    _pricingRule: rule,
+  };
+  const productB = {
+    id: 106,
+    retail_price: '80', wholesale_price: '55', min_qty_wholesale: 5,
+    requires_manual_price: false,
+    _pricingRule: rule,
+  };
+
+  const items = [
+    { product_id: 105, quantity: 3 },
+    { product_id: 106, quantity: 2 },
+  ];
+  const productMap = { 105: productA, 106: productB };
+  const tiersMap = {};
+
+  // Group total = 5, threshold = 5 → at threshold
+  const result = evaluateCartPricingWithMeta(items, productMap, tiersMap);
+
+  assert.strictEqual(result[0].is_wholesale_eligible, true, 'GROUP_THRESHOLD group total 5 = threshold 5 → eligible');
+  assert.strictEqual(result[0].effective_qty, 5);
+  assert.strictEqual(result[0].unit_price.toFixed(2), '70.00');
+  assert.strictEqual(result[1].is_wholesale_eligible, true);
+  assert.strictEqual(result[1].effective_qty, 5);
+  assert.strictEqual(result[1].unit_price.toFixed(2), '55.00');
+}
+
+// Legacy (no pricing rule): qty below min_qty_wholesale → is_wholesale_eligible=false
+{
+  const product = {
+    id: 107,
+    retail_price: '100', wholesale_price: '70', min_qty_wholesale: 5,
+    requires_manual_price: false,
+    _pricingRule: null,
+  };
+  const items = [{ product_id: 107, quantity: 2 }];
+  const productMap = { 107: product };
+  const tiersMap = {};
+
+  const result = evaluateCartPricingWithMeta(items, productMap, tiersMap);
+
+  assert.strictEqual(result[0].is_wholesale_eligible, false, 'legacy: qty 2 < min_qty_wholesale 5 → not eligible');
+  assert.strictEqual(result[0].threshold_qty, 5, 'legacy threshold is product.min_qty_wholesale');
+  assert.strictEqual(result[0].rule_type, 'legacy');
+  assert.strictEqual(result[0].unit_price.toFixed(2), '100.00');
+}
+
+// Legacy (no pricing rule): qty at min_qty_wholesale → is_wholesale_eligible=true
+{
+  const product = {
+    id: 108,
+    retail_price: '100', wholesale_price: '70', min_qty_wholesale: 5,
+    requires_manual_price: false,
+    _pricingRule: null,
+  };
+  const items = [{ product_id: 108, quantity: 5 }];
+  const productMap = { 108: product };
+  const tiersMap = {};
+
+  const result = evaluateCartPricingWithMeta(items, productMap, tiersMap);
+
+  assert.strictEqual(result[0].is_wholesale_eligible, true, 'legacy: qty 5 = min_qty_wholesale 5 → eligible');
+  assert.strictEqual(result[0].threshold_qty, 5);
+  assert.strictEqual(result[0].unit_price.toFixed(2), '70.00');
+}
+
+// CONSTANT rule: is_wholesale_eligible is always false (no threshold-based wholesale)
+{
+  const product = {
+    id: 109,
+    retail_price: '200', wholesale_price: '120', min_qty_wholesale: 1,
+    requires_manual_price: false,
+    _pricingRule: { id: 50, rule_type: RULE_TYPES.CONSTANT, threshold_qty: null, name: 'ConstantRule' },
+  };
+  const items = [{ product_id: 109, quantity: 100 }];
+  const productMap = { 109: product };
+  const tiersMap = {};
+
+  const result = evaluateCartPricingWithMeta(items, productMap, tiersMap);
+
+  assert.strictEqual(result[0].is_wholesale_eligible, false, 'CONSTANT rule never grants wholesale');
+  assert.strictEqual(result[0].threshold_qty, null, 'CONSTANT rule has no threshold');
+  assert.strictEqual(result[0].unit_price.toFixed(2), '200.00');
+  assert.strictEqual(result[0].pricing_label, 'constant');
+}
+
+// evaluateCartPricing delegates to evaluateCartPricingWithMeta — backward compatible
+{
+  const product = {
+    id: 110,
+    retail_price: '100', wholesale_price: '70', min_qty_wholesale: 3,
+    requires_manual_price: false,
+    _pricingRule: { id: 60, rule_type: RULE_TYPES.SKU_THRESHOLD, threshold_qty: 3, name: 'Min3' },
+  };
+  const items = [{ product_id: 110, quantity: 3 }];
+  const productMap = { 110: product };
+  const tiersMap = {};
+
+  const result = evaluateCartPricing(items, productMap, tiersMap);
+
+  // evaluateCartPricing must still return unit_price and price_source
+  assert.strictEqual(result[0].unit_price.toFixed(2), '70.00', 'evaluateCartPricing backward-compatible');
+  assert.strictEqual(result[0].price_source, 'rule:SKU_THRESHOLD:wholesale');
 }
 
 console.log('pricingRuleEvaluator tests passed');
