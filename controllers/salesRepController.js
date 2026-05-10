@@ -297,7 +297,8 @@ const saveSalesRepLocation = async (req, res) => {
       return handleError(res, 400, 'Invalid latitude/longitude range');
     }
 
-    if (req.user?.role === 'sales_rep' && Number(req.user.sales_rep_id) !== Number(id)) {
+    const authenticatedSalesRepId = req.salesRepAuth?.sales_rep_id || req.user?.sales_rep_id;
+    if (authenticatedSalesRepId && Number(authenticatedSalesRepId) !== Number(id)) {
       return handleError(res, 403, 'Sales reps can only update their own location');
     }
 
@@ -462,8 +463,8 @@ const createSalesRep = async (req, res) => {
     const normalizedUsername = username ? String(username).trim().toLowerCase() : null;
     const resolvedPhone = String(phone || phone_number || '').trim() || null;
     const resolvedRouteArea = String(route_area || '').trim() || null;
-    const issuedTemporaryPassword = String(temporary_password || '').trim() || generateTemporaryPassword();
-    const passwordHash = await bcrypt.hash(issuedTemporaryPassword, 10);
+    const resolvedTemporaryPassword = String(temporary_password || '').trim() || generateTemporaryPassword();
+    const passwordHash = await bcrypt.hash(resolvedTemporaryPassword, 10);
 
     const result = await pool.query(
       `INSERT INTO sales_reps
@@ -502,7 +503,7 @@ const createSalesRep = async (req, res) => {
       sales_rep: normalizeSalesRepResponse(result.rows[0]),
       credentials: {
         username: result.rows[0].username || result.rows[0].email,
-        temporary_password: issuedTemporaryPassword,
+        temporary_password: resolvedTemporaryPassword,
         must_change_password: true,
       },
     });
@@ -547,7 +548,7 @@ const updateSalesRep = async (req, res) => {
            route_area = COALESCE($5, route_area),
            status = COALESCE($6, status),
            is_active = COALESCE($7, is_active),
-            updated_at = CURRENT_TIMESTAMP
+           updated_at = CURRENT_TIMESTAMP
        WHERE id = $8
        RETURNING *`,
       [
@@ -762,21 +763,25 @@ const changeSalesRepPassword = async (req, res) => {
 };
 
 const saveOwnSalesRepLocation = async (req, res) => {
-  const salesRepId = req.salesRepAuth?.sales_rep_id;
-  const rep = await getSalesRepByIdForAuth(salesRepId);
+  try {
+    const salesRepId = req.salesRepAuth?.sales_rep_id;
+    const rep = await getSalesRepByIdForAuth(salesRepId);
 
-  if (!rep) {
-    return handleError(res, 404, 'Sales rep not found');
-  }
-  if (!rep.is_active || rep.status === 'inactive') {
-    return handleError(res, 403, 'Sales rep account is inactive');
-  }
-  if (rep.must_change_password) {
-    return handleError(res, 403, 'Password change is required before location updates');
-  }
+    if (!rep) {
+      return handleError(res, 404, 'Sales rep not found');
+    }
+    if (!rep.is_active || rep.status === 'inactive') {
+      return handleError(res, 403, 'Sales rep account is inactive');
+    }
+    if (rep.must_change_password) {
+      return handleError(res, 403, 'Password change is required before location updates');
+    }
 
-  req.params.id = salesRepId;
-  return saveSalesRepLocation(req, res);
+    req.params.id = salesRepId;
+    return saveSalesRepLocation(req, res);
+  } catch (err) {
+    return handleError(res, 500, 'Failed to save sales rep location', err);
+  }
 };
 
 // Delete sales rep

@@ -1,6 +1,7 @@
 const express = require('express');
 const { verifyToken, requireAdmin } = require('../middleware/authMiddleware');
 const { verifySalesRepToken } = require('../middleware/salesRepAuthMiddleware');
+const { salesRepLoginRateLimiter, salesRepRateLimiter } = require('../middleware/rateLimitMiddleware');
 const {
   getAllSalesReps,
   getSalesRepById,
@@ -20,25 +21,25 @@ const {
 const router = express.Router();
 
 // sales rep auth/session endpoints
-router.post('/auth/login', loginSalesRep);
-router.get('/auth/me', verifySalesRepToken, getSalesRepSession);
-router.post('/auth/change-password', verifySalesRepToken, changeSalesRepPassword);
-router.post('/me/location', verifySalesRepToken, saveOwnSalesRepLocation);
+router.post('/auth/login', salesRepLoginRateLimiter, loginSalesRep);
+router.get('/auth/me', salesRepRateLimiter, verifySalesRepToken, getSalesRepSession);
+router.post('/auth/change-password', salesRepRateLimiter, verifySalesRepToken, changeSalesRepPassword);
+router.post('/me/location', salesRepRateLimiter, verifySalesRepToken, saveOwnSalesRepLocation);
 
 // latest locations for all reps
-router.get('/locations/latest', verifyToken, requireAdmin, getLatestSalesRepLocations);
+router.get('/locations/latest', salesRepRateLimiter, verifyToken, requireAdmin, getLatestSalesRepLocations);
 
 // single sales rep CRUD/detail
-router.get('/', verifyToken, requireAdmin, getAllSalesReps);
-router.get('/:id', verifyToken, requireAdmin, getSalesRepById);
+router.get('/', salesRepRateLimiter, verifyToken, requireAdmin, getAllSalesReps);
+router.get('/:id', salesRepRateLimiter, verifyToken, requireAdmin, getSalesRepById);
 
 // location ping endpoints
-router.get('/:id/location/latest', verifyToken, getLatestSalesRepLocation);
-router.post('/:id/location', verifyToken, saveSalesRepLocation);
+router.get('/:id/location/latest', salesRepRateLimiter, verifyToken, getLatestSalesRepLocation);
+router.post('/:id/location', salesRepRateLimiter, verifyToken, saveSalesRepLocation);
 
-router.post('/', verifyToken, requireAdmin, createSalesRep);
-router.put('/:id', verifyToken, requireAdmin, updateSalesRep);
-router.post('/:id/reset-password', verifyToken, requireAdmin, resetSalesRepPassword);
+router.post('/', salesRepRateLimiter, verifyToken, requireAdmin, createSalesRep);
+router.put('/:id', salesRepRateLimiter, verifyToken, requireAdmin, updateSalesRep);
+router.post('/:id/reset-password', salesRepRateLimiter, verifyToken, requireAdmin, resetSalesRepPassword);
 router.delete('/:id', verifyToken, requireAdmin, deleteSalesRep);
 
 module.exports = router;
