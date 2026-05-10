@@ -14,7 +14,8 @@ function roundMoney(value) {
   if (value == null) return null;
 
   try {
-    return new Decimal(value).toDecimalPlaces(2).toNumber();
+    const amount = value instanceof Decimal ? value : new Decimal(value);
+    return amount.toDecimalPlaces(2).toNumber();
   } catch {
     return null;
   }
@@ -28,7 +29,7 @@ function normalizeUnitPrice(unitPrice) {
       ? unitPrice
       : new Decimal(unitPrice);
 
-  return roundMoney(amount.toNumber());
+  return roundMoney(amount);
 }
 
 function normalizeEvaluationItems(items) {
