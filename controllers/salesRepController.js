@@ -1,9 +1,10 @@
 const pool = require('../config/database');
 const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { handleError, handleSuccess } = require('../utils/errorHandler');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+const JWT_SECRET = process.env.JWT_SECRET;
 const SALES_REP_TOKEN_EXPIRY = '24h';
 
 function normalizeNumber(value, fallback = null) {
@@ -24,16 +25,19 @@ function normalizeBooleanInput(value, fallback) {
   return fallback;
 }
 
-function generateTemporaryPassword(length = 10) {
+function generateTemporaryPassword(length = 12) {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%';
   let out = '';
   for (let i = 0; i < length; i += 1) {
-    out += chars.charAt(Math.floor(Math.random() * chars.length));
+    out += chars.charAt(crypto.randomInt(0, chars.length));
   }
   return out;
 }
 
 function signSalesRepToken(rep) {
+  if (!JWT_SECRET) {
+    throw new Error('JWT secret is not configured');
+  }
   return jwt.sign(
     {
       token_type: 'sales_rep',
@@ -43,6 +47,14 @@ function signSalesRepToken(rep) {
     JWT_SECRET,
     { expiresIn: SALES_REP_TOKEN_EXPIRY }
   );
+}
+
+function validateTemporaryPassword(value) {
+  if (!value || String(value).length < 8) {
+    const err = new Error('temporary_password must be at least 8 characters');
+    err.status = 400;
+    throw err;
+  }
 }
 
 function normalizeSalesRepResponse(rep) {
@@ -464,6 +476,7 @@ const createSalesRep = async (req, res) => {
     const resolvedPhone = String(phone || phone_number || '').trim() || null;
     const resolvedRouteArea = String(route_area || '').trim() || null;
     const resolvedTemporaryPassword = String(temporary_password || '').trim() || generateTemporaryPassword();
+    validateTemporaryPassword(resolvedTemporaryPassword);
     const passwordHash = await bcrypt.hash(resolvedTemporaryPassword, 10);
 
     const result = await pool.query(
@@ -505,9 +518,13 @@ const createSalesRep = async (req, res) => {
         username: result.rows[0].username || result.rows[0].email,
         temporary_password: resolvedTemporaryPassword,
         must_change_password: true,
+        handling_warning: 'Store and share this temporary password securely. It is shown only in this response.',
       },
     });
   } catch (err) {
+    if (err.status) {
+      return handleError(res, err.status, err.message);
+    }
     if (err.code === '23505') {
       return handleError(res, 409, 'Sales rep with this email or username already exists');
     }
@@ -521,9 +538,9 @@ const updateSalesRep = async (req, res) => {
     const { id } = req.params;
     const { name, full_name, phone, phone_number, email, username, route_area, status, is_active } = req.body;
 
-    const resolvedName = full_name !== undefined || name !== undefined
-      ? String(full_name || name || '').trim()
-      : null;
+    const resolvedName = full_name !== undefined
+      ? String(full_name || '').trim()
+      : (name !== undefined ? String(name || '').trim() : null);
     const resolvedPhone = phone !== undefined || phone_number !== undefined
       ? (String(phone || phone_number || '').trim() || null)
       : undefined;
@@ -580,6 +597,7 @@ const resetSalesRepPassword = async (req, res) => {
   try {
     const { id } = req.params;
     const temporaryPassword = String(req.body?.temporary_password || '').trim() || generateTemporaryPassword();
+    validateTemporaryPassword(temporaryPassword);
     const passwordHash = await bcrypt.hash(temporaryPassword, 10);
 
     const result = await pool.query(
@@ -605,9 +623,13 @@ const resetSalesRepPassword = async (req, res) => {
         username: result.rows[0].username || result.rows[0].email,
         temporary_password: temporaryPassword,
         must_change_password: true,
+        handling_warning: 'Store and share this temporary password securely. It is shown only in this response.',
       },
     });
   } catch (err) {
+    if (err.status) {
+      return handleError(res, err.status, err.message);
+    }
     return handleError(res, 500, 'Failed to reset sales rep password', err);
   }
 };
@@ -618,6 +640,9 @@ const loginSalesRep = async (req, res) => {
     const normalizedIdentifier = String(identifier || username || email || '').trim().toLowerCase();
     if (!normalizedIdentifier || !password) {
       return handleError(res, 400, 'identifier (username/email) and password are required');
+    }
+    if (!JWT_SECRET) {
+      return handleError(res, 500, 'JWT secret is not configured');
     }
 
     const result = await pool.query(

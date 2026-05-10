@@ -50,7 +50,7 @@ function assertWholesaleEligibility(pricingMode, evalItem, productId) {
 
 const VALID_ORDER_TYPES = new Set(['normal', 'route']);
 const VALID_ORDER_STATUSES = new Set(['pending', 'processing', 'dispatched', 'completed', 'cancelled']);
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+const JWT_SECRET = process.env.JWT_SECRET;
 
 function toNumber(value, fallback = 0) {
   const n = Number(value);
@@ -140,6 +140,8 @@ function getBearerToken(req) {
 }
 
 async function resolveAuthenticatedSalesRep(req, client) {
+  if (!JWT_SECRET) return null;
+
   const token = getBearerToken(req);
   if (!token) return null;
 

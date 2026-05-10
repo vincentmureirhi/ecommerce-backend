@@ -12,8 +12,14 @@ ALTER TABLE sales_reps
 
 UPDATE sales_reps
 SET
-  full_name = COALESCE(NULLIF(full_name, ''), name),
-  phone = COALESCE(NULLIF(phone, ''), phone_number),
+  full_name = CASE
+    WHEN full_name IS NULL OR full_name = '' THEN name
+    ELSE full_name
+  END,
+  phone = CASE
+    WHEN phone IS NULL OR phone = '' THEN phone_number
+    ELSE phone
+  END,
   is_active = CASE WHEN status = 'inactive' THEN FALSE ELSE TRUE END;
 
 ALTER TABLE sales_reps

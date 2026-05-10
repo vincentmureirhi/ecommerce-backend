@@ -2,10 +2,17 @@
 
 const jwt = require('jsonwebtoken');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+const JWT_SECRET = process.env.JWT_SECRET;
 
 const verifySalesRepToken = (req, res, next) => {
   try {
+    if (!JWT_SECRET) {
+      return res.status(500).json({
+        success: false,
+        message: 'JWT secret is not configured',
+      });
+    }
+
     const authHeader = req.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
