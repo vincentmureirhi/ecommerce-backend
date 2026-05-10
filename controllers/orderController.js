@@ -1,5 +1,6 @@
 'use strict';
 
+const jwt = require('jsonwebtoken');
 const pool = require('../config/database');
 const { handleError, handleSuccess } = require('../utils/errorHandler');
 const generateOrderNumber = require('../utils/generateOrderNumber');
@@ -49,6 +50,7 @@ function assertWholesaleEligibility(pricingMode, evalItem, productId) {
 
 const VALID_ORDER_TYPES = new Set(['normal', 'route']);
 const VALID_ORDER_STATUSES = new Set(['pending', 'processing', 'dispatched', 'completed', 'cancelled']);
+const JWT_SECRET = process.env.JWT_SECRET;
 
 function toNumber(value, fallback = 0) {
   const n = Number(value);
@@ -129,6 +131,50 @@ function enrichOrder(order) {
         ? derivedPaymentState
         : (order.payment_status || 'pending'),
   };
+}
+
+function getBearerToken(req) {
+  const authHeader = req.headers?.authorization || '';
+  if (!authHeader.startsWith('Bearer ')) return null;
+  return authHeader.slice(7).trim() || null;
+}
+
+async function resolveAuthenticatedSalesRep(req, client) {
+  if (!JWT_SECRET) return null;
+
+  const token = getBearerToken(req);
+  if (!token) return null;
+
+  let decoded;
+  try {
+    decoded = jwt.verify(token, JWT_SECRET);
+  } catch (err) {
+    return null;
+  }
+
+  if (decoded.token_type !== 'sales_rep' || decoded.role !== 'sales_rep' || !decoded.sales_rep_id) {
+    return null;
+  }
+
+  const result = await client.query(
+    `
+    SELECT id, is_active, status, must_change_password
+    FROM sales_reps
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [decoded.sales_rep_id]
+  );
+
+  if (result.rows.length === 0 || !result.rows[0].is_active || result.rows[0].status === 'inactive') {
+    throw new OrderValidationError('Sales rep session is invalid or inactive');
+  }
+
+  if (result.rows[0].must_change_password) {
+    throw new OrderValidationError('Sales rep must change password before capturing orders');
+  }
+
+  return result.rows[0];
 }
 
 async function fetchValidatedProduct(client, productId) {
@@ -458,8 +504,8 @@ const getAllOrders = async (req, res) => {
       SELECT
         o.*,
         COALESCE(o.amount_paid, 0) AS amount_paid,
-        sr.name AS sales_rep_name,
-        sr.phone_number AS sales_rep_phone,
+        COALESCE(sr.full_name, sr.name) AS sales_rep_name,
+        COALESCE(sr.phone, sr.phone_number) AS sales_rep_phone,
         l.name AS location_name,
         r.name AS region_name,
         COUNT(DISTINCT oi.id) AS item_count,
@@ -583,8 +629,8 @@ const getOrderById = async (req, res) => {
       SELECT
         o.*,
         COALESCE(o.amount_paid, 0) AS amount_paid,
-        sr.name AS sales_rep_name,
-        sr.phone_number AS sales_rep_phone,
+        COALESCE(sr.full_name, sr.name) AS sales_rep_name,
+        COALESCE(sr.phone, sr.phone_number) AS sales_rep_phone,
         l.name AS location_name,
         r.name AS region_name
       FROM orders o
@@ -913,6 +959,8 @@ const createOrder = async (req, res) => {
       due_date,
     } = req.body;
 
+    const authenticatedSalesRep = await resolveAuthenticatedSalesRep(req, client);
+
     const normalizedOrderType = String(order_type || '').trim().toLowerCase();
 
     if (!VALID_ORDER_TYPES.has(normalizedOrderType)) {
@@ -936,7 +984,16 @@ const createOrder = async (req, res) => {
       return handleError(res, 400, 'At least one order item is required');
     }
 
-    if (normalizedOrderType === 'route' && !sales_rep_id) {
+    let effectiveSalesRepId = sales_rep_id || null;
+
+    if (authenticatedSalesRep) {
+      if (effectiveSalesRepId && Number(effectiveSalesRepId) !== Number(authenticatedSalesRep.id)) {
+        return handleError(res, 403, 'Authenticated sales rep does not match provided sales_rep_id');
+      }
+      effectiveSalesRepId = authenticatedSalesRep.id;
+    }
+
+    if (normalizedOrderType === 'route' && !effectiveSalesRepId) {
       return handleError(res, 400, 'sales_rep_id is required for route orders');
     }
 
@@ -968,7 +1025,7 @@ const createOrder = async (req, res) => {
       return handleError(res, 400, 'Route workflows are only valid for route orders');
     }
 
-    if (requestedWorkflowType === 'route_sales_rep_capture' && !sales_rep_id) {
+    if (requestedWorkflowType === 'route_sales_rep_capture' && !effectiveSalesRepId) {
       return handleError(res, 400, 'sales_rep_id is required for route_sales_rep_capture workflow');
     }
 
@@ -983,10 +1040,10 @@ const createOrder = async (req, res) => {
       }
     }
 
-    if (sales_rep_id) {
+    if (effectiveSalesRepId) {
       const repCheck = await client.query(
         'SELECT id FROM sales_reps WHERE id = $1',
-        [sales_rep_id]
+        [effectiveSalesRepId]
       );
 
       if (repCheck.rows.length === 0) {
@@ -1002,7 +1059,7 @@ const createOrder = async (req, res) => {
         customerId: customer_id || null,
         customerName: normalizedCustomerName,
         customerPhone: normalizedCustomerPhone,
-        salesRepId: sales_rep_id || null,
+        salesRepId: effectiveSalesRepId || null,
         locationId: customer_location_id || null,
         address: normalizedCustomerAddress,
         routeArea: normalizedRouteArea,
@@ -1128,7 +1185,7 @@ const createOrder = async (req, res) => {
 
     const inferredWorkflowType =
       normalizedOrderType === 'route'
-        ? (sales_rep_id ? 'route_sales_rep_capture' : 'route_self_service')
+        ? (effectiveSalesRepId ? 'route_sales_rep_capture' : 'route_self_service')
         : 'normal_self_service';
 
     const finalWorkflowType = requestedWorkflowType || inferredWorkflowType;
@@ -1164,7 +1221,7 @@ const createOrder = async (req, res) => {
         resolvedCustomerId,
         normalizedCustomerName,
         normalizedCustomerPhone,
-        sales_rep_id || null,
+        effectiveSalesRepId || null,
         finalWorkflowType,
         finalTotalAmount,
         roundMoney(submittedAmountPaid),
@@ -1433,8 +1490,8 @@ const getOrderForPrint = async (req, res) => {
       SELECT
         o.*,
         COALESCE(o.amount_paid, 0) AS amount_paid,
-        sr.name AS sales_rep_name,
-        sr.phone_number AS sales_rep_phone,
+        COALESCE(sr.full_name, sr.name) AS sales_rep_name,
+        COALESCE(sr.phone, sr.phone_number) AS sales_rep_phone,
         l.name AS location_name,
         r.name AS region_name
       FROM orders o
