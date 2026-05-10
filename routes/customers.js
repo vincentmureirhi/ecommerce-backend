@@ -16,9 +16,10 @@ const {
 } = require('../controllers/customerController');
 
 const { verifyToken, requireAdmin } = require('../middleware/authMiddleware');
+const { routeCustomerUpsertRateLimiter } = require('../middleware/rateLimitMiddleware');
 
 router.get('/', verifyToken, getAllCustomers);
-router.post('/route/upsert', verifyToken, upsertRouteCustomer);
+router.post('/route/upsert', routeCustomerUpsertRateLimiter, verifyToken, upsertRouteCustomer);
 
 // more specific routes first
 router.get('/:id/summary', verifyToken, getCustomerSummary);
