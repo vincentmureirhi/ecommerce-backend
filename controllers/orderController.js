@@ -1812,4 +1812,5 @@ module.exports = {
   getOrderForPrint,
   getOrderStatistics,
   trackPublicOrder,
+  loadPricingContext,
 };
