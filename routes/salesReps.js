@@ -34,8 +34,8 @@ router.get('/', salesRepRateLimiter, verifyToken, requireAdmin, getAllSalesReps)
 router.get('/:id', salesRepRateLimiter, verifyToken, requireAdmin, getSalesRepById);
 
 // location ping endpoints
-router.get('/:id/location/latest', salesRepRateLimiter, verifyToken, getLatestSalesRepLocation);
-router.post('/:id/location', salesRepRateLimiter, verifyToken, saveSalesRepLocation);
+router.get('/:id/location/latest', salesRepRateLimiter, verifyToken, requireAdmin, getLatestSalesRepLocation);
+router.post('/:id/location', salesRepRateLimiter, verifyToken, requireAdmin, saveSalesRepLocation);
 
 router.post('/', salesRepRateLimiter, verifyToken, requireAdmin, createSalesRep);
 router.put('/:id', salesRepRateLimiter, verifyToken, requireAdmin, updateSalesRep);

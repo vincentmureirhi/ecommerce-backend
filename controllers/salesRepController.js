@@ -309,11 +309,6 @@ const saveSalesRepLocation = async (req, res) => {
       return handleError(res, 400, 'Invalid latitude/longitude range');
     }
 
-    const authenticatedSalesRepId = req.salesRepAuth?.sales_rep_id || req.user?.sales_rep_id;
-    if (authenticatedSalesRepId && Number(authenticatedSalesRepId) !== Number(id)) {
-      return handleError(res, 403, 'Sales reps can only update their own location');
-    }
-
     const repCheck = await pool.query(
       'SELECT id, is_active, status FROM sales_reps WHERE id = $1',
       [id]
