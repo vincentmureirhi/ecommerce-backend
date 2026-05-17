@@ -2,13 +2,18 @@
 
 const { Pool } = require('pg');
 const path = require('path');
-require('dotenv').config({ path: path.resolve(process.cwd(), '.env') });
+
+require('dotenv').config({
+  path: path.resolve(process.cwd(), '.env'),
+});
 
 function reqEnv(name) {
   const v = process.env[name];
+
   if (!v || String(v).trim() === '') {
     throw new Error(`Missing required env var: ${name}`);
   }
+
   return v;
 }
 
@@ -18,10 +23,17 @@ const config = {
   database: reqEnv('DB_NAME'),
   user: reqEnv('DB_USER'),
   password: reqEnv('DB_PASSWORD'),
+
+  // VERY IMPORTANT FOR SUPABASE
+  ssl: {
+    rejectUnauthorized: false,
+  },
 };
 
 if (!Number.isInteger(config.port) || config.port < 1) {
-  throw new Error(`DB_PORT must be a valid integer. Got: ${process.env.DB_PORT}`);
+  throw new Error(
+    `DB_PORT must be a valid integer. Got: ${process.env.DB_PORT}`
+  );
 }
 
 const pool = new Pool(config);
@@ -30,11 +42,19 @@ pool.on('error', (err) => {
   console.error('❌ Unexpected error on idle pg client:', err.message);
 });
 
-// Test connection at startup (fail fast)
+// Test DB connection immediately
 (async () => {
   try {
-    const res = await pool.query('SELECT current_user, current_database(), inet_server_addr() AS host, inet_server_port() AS port');
+    const res = await pool.query(`
+      SELECT
+        current_user,
+        current_database(),
+        inet_server_addr() AS host,
+        inet_server_port() AS port
+    `);
+
     const row = res.rows[0];
+
     console.log('✅ DATABASE CONNECTED');
     console.log('--------------------------------------');
     console.log('User      :', row.current_user);
@@ -43,10 +63,13 @@ pool.on('error', (err) => {
     console.log('Port      :', row.port);
     console.log('Env file  :', path.resolve(process.cwd(), '.env'));
     console.log('════════════════');
+
   } catch (err) {
     console.error('❌ DATABASE CONNECTION FAILED');
     console.error(err.message);
+
     console.error('\nWhat Node THINKS it is using:');
+
     console.error({
       DB_HOST: process.env.DB_HOST,
       DB_PORT: process.env.DB_PORT,
@@ -56,7 +79,9 @@ pool.on('error', (err) => {
       ENV_PATH: path.resolve(process.cwd(), '.env'),
       CWD: process.cwd(),
     });
-    console.error('\nFix your .env / environment variables, then restart.');
+
+    console.error('\nFix your environment variables and restart.');
+
     process.exit(1);
   }
 })();

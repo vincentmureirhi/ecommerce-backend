@@ -4,17 +4,20 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const http = require('http');
+
 require('dotenv').config();
 
-// Import database
+// ===== DATABASE =====
 const pool = require('./config/database');
 
-// Import WebSocket
+// ===== WEBSOCKET =====
 const { initializeWebSocket } = require('./websocket');
+
+// ===== JOBS =====
 const { autoFailStalePendingPayments } = require('./jobs/paymentAutoFail');
 const { autoProgressOrders } = require('./jobs/orderProgressionJob');
 
-// ===== IMPORT ROUTES =====
+// ===== ROUTES =====
 const authRoutes = require('./routes/auth');
 const productRoutes = require('./routes/products');
 const adminUsersRoutes = require('./routes/adminUsers');
@@ -43,40 +46,111 @@ const pricingGroupsRoutes = require('./routes/pricingGroups');
 
 const app = express();
 
-// Create HTTP server for WebSocket support
+// ===== CREATE HTTP SERVER =====
 const httpServer = http.createServer(app);
 
-// Initialize WebSocket
+// ===== INITIALIZE WEBSOCKET =====
 initializeWebSocket(httpServer);
 
-// Make WebSocket available globally
+// Make websocket globally available
 global.io = require('./websocket');
 
-// ===== MIDDLEWARE =====
-app.use(cors());
+// =====================================================
+// CORS CONFIG
+// =====================================================
+
+const allowedOrigins = [
+  'http://localhost:8080',
+  'http://localhost:5173',
+  'http://127.0.0.1:8080',
+  'http://127.0.0.1:5173',
+
+  // REPLACE THIS WITH YOUR REAL FRONTEND URL LATER
+  'https://your-frontend.onrender.com',
+];
+
+const corsOptions = {
+  origin(origin, callback) {
+    // allow postman/mobile apps/server-side requests
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    console.log('❌ BLOCKED CORS:', origin);
+
+    return callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
+
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+  ],
+
+  credentials: true,
+};
+
+// Apply CORS
+app.use(cors(corsOptions));
+
+// IMPORTANT: Handle preflight requests
+app.options('*', cors(corsOptions));
+
+// =====================================================
+// BODY PARSERS
+// =====================================================
+
 app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// ✅ SERVE STATIC FILES (images)
-app.use('/images', express.static(path.join(__dirname, 'public/images')));
+app.use(express.urlencoded({
+  extended: true,
+  limit: '10mb',
+}));
 
-// Request logging middleware
+// =====================================================
+// STATIC FILES
+// =====================================================
+
+app.use(
+  '/images',
+  express.static(path.join(__dirname, 'public/images'))
+);
+
+// =====================================================
+// REQUEST LOGGER
+// =====================================================
+
 app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  console.log(
+    `[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`
+  );
+
   next();
 });
 
-// ===== HEALTH CHECK =====
+// =====================================================
+// HEALTH CHECK
+// =====================================================
+
 app.get('/api/health', async (req, res) => {
   try {
     const result = await pool.query('SELECT NOW()');
-    return res.json({
+
+    return res.status(200).json({
       success: true,
       message: 'Server and database are running',
       timestamp: result.rows[0].now,
-      env: process.env.NODE_ENV,
+      environment: process.env.NODE_ENV,
     });
+
   } catch (err) {
+    console.error('❌ HEALTH CHECK FAILED:', err.message);
+
     return res.status(500).json({
       success: false,
       message: 'Database connection failed',
@@ -85,34 +159,64 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
-// ===== API ROUTES =====
+// =====================================================
+// API ROUTES
+// =====================================================
+
 app.use('/api/auth', authRoutes);
+
 app.use('/api/analytics', analyticsRoutes);
+
 app.use('/api/products', productRoutes);
+
 app.use('/api/categories', categoryRoutes);
+
 app.use('/api/departments', departmentRoutes);
+
 app.use('/api/regions', regionRoutes);
+
 app.use('/api/locations', locationRoutes);
+
 app.use('/api/customer-locations', customerLocationRoutes);
+
 app.use('/api/customers', customerRoutes);
+
 app.use('/api/sales-reps', salesRepRoutes);
+
 app.use('/api/routes', routeRoutes);
+
 app.use('/api/buying-customers', buyingCustomersRoutes);
+
 app.use('/api/orders', orderRoutes);
+
 app.use('/api/payments', paymentRoutes);
+
 app.use('/api/price-tiers', priceTierRoutes);
+
 app.use('/api/inventory', inventoryRoutes);
+
 app.use('/api/suppliers', suppliersRouter);
+
 app.use('/api/uploads', uploadRoutes);
+
 app.use('/api/admin-users', adminUsersRoutes);
+
 app.use('/api/route-customer-portal', routeCustomerPortalRoutes);
+
 app.use('/api/flash-sales', flashSalesRoutes);
+
 app.use('/api/blog', blogRoutes);
+
 app.use('/api/pricing', pricingRoutes);
+
 app.use('/api/pricing-rules', pricingRulesRoutes);
+
 app.use('/api/pricing-groups', pricingGroupsRoutes);
 
-// ===== 404 =====
+// =====================================================
+// 404 HANDLER
+// =====================================================
+
 app.use((req, res) => {
   return res.status(404).json({
     success: false,
@@ -122,13 +226,17 @@ app.use((req, res) => {
   });
 });
 
-// ===== GLOBAL ERROR =====
+// =====================================================
+// GLOBAL ERROR HANDLER
+// =====================================================
+
 app.use((err, req, res, next) => {
-  console.error('Global Error:', err);
+  console.error('❌ GLOBAL ERROR:', err);
 
   return res.status(500).json({
     success: false,
     error: 'Internal server error',
+
     message:
       process.env.NODE_ENV === 'development'
         ? err.message
@@ -136,46 +244,69 @@ app.use((err, req, res, next) => {
   });
 });
 
-// ===== START BACKGROUND JOBS =====
-// Auto-fail stale pending payments every 60 seconds
+// =====================================================
+// BACKGROUND JOBS
+// =====================================================
+
+// Auto-fail stale payments every 60 seconds
 setInterval(async () => {
   try {
     await autoFailStalePendingPayments();
+
   } catch (err) {
-    console.error('❌ Auto-fail job error:', err.message);
+    console.error(
+      '❌ Auto-fail payment job error:',
+      err.message
+    );
   }
 }, 60000);
 
-console.log('✅ Payment auto-fail job started (15-minute timeout)');
+console.log(
+  '✅ Payment auto-fail job started'
+);
 
-// Auto-progress stale orders every 5 minutes
-// processing -> dispatched after 4 h without a manual status change
-// dispatched  -> completed  after 8 h without a manual status change
+// Auto-progress orders every 5 minutes
 setInterval(async () => {
   try {
     await autoProgressOrders();
+
   } catch (err) {
-    console.error('❌ Order progression job error:', err.message);
+    console.error(
+      '❌ Order progression job error:',
+      err.message
+    );
   }
 }, 5 * 60 * 1000);
 
-console.log('✅ Order auto-progression job started (4 h processing→dispatched, 8 h dispatched→completed)');
+console.log(
+  '✅ Order auto-progression job started'
+);
 
-// ===== START SERVER =====
+// =====================================================
+// START SERVER
+// =====================================================
+
 const PORT = process.env.PORT || 5000;
 
 httpServer.listen(PORT, () => {
   console.log('\n');
-  console.log('┌─────────────────────────────────────────────┐');
-  console.log('│  E-COMMERCE BACKEND SERVER STARTED          │');
-  console.log('├─────────────────────────────────────────────┤');
-  console.log(`│  Server: http://localhost:${PORT}`.padEnd(46) + '│');
-  console.log(`│  WebSocket: ws://localhost:${PORT}`.padEnd(46) + '│');
-  console.log(`│  Environment: ${process.env.NODE_ENV}`.padEnd(46) + '│');
-  console.log(`│  Database: ${process.env.DB_NAME}`.padEnd(46) + '│');
-  console.log('│                                             │');
-  console.log('│  API Ready for Testing!                     │');
-  console.log('└─────────────────────────────────────────────┘');
+
+  console.log('┌──────────────────────────────────────┐');
+  console.log('│   E-COMMERCE BACKEND STARTED        │');
+  console.log('├──────────────────────────────────────┤');
+
+  console.log(
+    `│ Server: http://localhost:${PORT}`
+      .padEnd(39) + '│'
+  );
+
+  console.log(
+    `│ Environment: ${process.env.NODE_ENV}`
+      .padEnd(39) + '│'
+  );
+
+  console.log('└──────────────────────────────────────┘');
+
   console.log('\n');
 });
 
