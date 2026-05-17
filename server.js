@@ -45,91 +45,76 @@ const pricingRulesRoutes = require('./routes/pricingRules');
 const pricingGroupsRoutes = require('./routes/pricingGroups');
 
 const app = express();
-
-// ===== CREATE HTTP SERVER =====
 const httpServer = http.createServer(app);
 
-// ===== INITIALIZE WEBSOCKET =====
+// ===== WEBSOCKET =====
 initializeWebSocket(httpServer);
-
-// Make websocket globally available
 global.io = require('./websocket');
 
 // =====================================================
-// CORS CONFIG
+// 🔥 FIXED CORS (PRODUCTION SAFE)
 // =====================================================
 
 const allowedOrigins = [
-  'http://localhost:8080',
   'http://localhost:5173',
-  'http://127.0.0.1:8080',
+  'http://localhost:8080',
   'http://127.0.0.1:5173',
+  'http://127.0.0.1:8080',
 
-  // REPLACE THIS WITH YOUR REAL FRONTEND URL LATER
-  'https://your-frontend.onrender.com',
+  // ✅ YOUR FRONTEND (VERCEL)
+  'https://ecommerce-admin-seven-ashy.vercel.app',
 ];
 
 const corsOptions = {
-  origin(origin, callback) {
-    // allow postman/mobile apps/server-side requests
-    if (!origin) {
-      return callback(null, true);
-    }
+  origin: function (origin, callback) {
+    // allow server-to-server / mobile apps
+    if (!origin) return callback(null, true);
 
-    if (allowedOrigins.includes(origin)) {
+    // normalize origin (fixes trailing slash + weird browser formats)
+    const cleanOrigin = origin.replace(/\/$/, '');
+
+    if (allowedOrigins.includes(cleanOrigin)) {
       return callback(null, true);
     }
 
     console.log('❌ BLOCKED CORS:', origin);
 
-    return callback(new Error(`CORS blocked for origin: ${origin}`));
+    // ⚠️ IMPORTANT: don't crash server in production
+    return callback(null, false);
   },
 
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
 
-  allowedHeaders: [
-    'Content-Type',
-    'Authorization',
-  ],
+  allowedHeaders: ['Content-Type', 'Authorization'],
 
   credentials: true,
 };
 
-// Apply CORS
+// Apply CORS globally
 app.use(cors(corsOptions));
 
-// IMPORTANT: Handle preflight requests
+// IMPORTANT: preflight must ALWAYS succeed
 app.options('*', cors(corsOptions));
 
 // =====================================================
-// BODY PARSERS
+// BODY PARSING
 // =====================================================
 
 app.use(express.json({ limit: '10mb' }));
-
-app.use(express.urlencoded({
-  extended: true,
-  limit: '10mb',
-}));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // =====================================================
 // STATIC FILES
 // =====================================================
 
-app.use(
-  '/images',
-  express.static(path.join(__dirname, 'public/images'))
-);
+app.use('/images', express.static(path.join(__dirname, 'public/images')));
 
 // =====================================================
-// REQUEST LOGGER
+// LOGGING
 // =====================================================
 
 app.use((req, res, next) => {
-  console.log(
-    `[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`
-  );
-
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
   next();
 });
 
@@ -141,106 +126,72 @@ app.get('/api/health', async (req, res) => {
   try {
     const result = await pool.query('SELECT NOW()');
 
-    return res.status(200).json({
+    res.json({
       success: true,
-      message: 'Server and database are running',
+      db: true,
       timestamp: result.rows[0].now,
-      environment: process.env.NODE_ENV,
+      env: process.env.NODE_ENV,
     });
 
   } catch (err) {
-    console.error('❌ HEALTH CHECK FAILED:', err.message);
-
-    return res.status(500).json({
+    res.status(500).json({
       success: false,
-      message: 'Database connection failed',
       error: err.message,
     });
   }
 });
 
 // =====================================================
-// API ROUTES
+// ROUTES
 // =====================================================
 
 app.use('/api/auth', authRoutes);
-
-app.use('/api/analytics', analyticsRoutes);
-
 app.use('/api/products', productRoutes);
-
-app.use('/api/categories', categoryRoutes);
-
-app.use('/api/departments', departmentRoutes);
-
-app.use('/api/regions', regionRoutes);
-
-app.use('/api/locations', locationRoutes);
-
-app.use('/api/customer-locations', customerLocationRoutes);
-
-app.use('/api/customers', customerRoutes);
-
-app.use('/api/sales-reps', salesRepRoutes);
-
-app.use('/api/routes', routeRoutes);
-
-app.use('/api/buying-customers', buyingCustomersRoutes);
-
 app.use('/api/orders', orderRoutes);
-
 app.use('/api/payments', paymentRoutes);
-
-app.use('/api/price-tiers', priceTierRoutes);
-
-app.use('/api/inventory', inventoryRoutes);
-
-app.use('/api/suppliers', suppliersRouter);
-
-app.use('/api/uploads', uploadRoutes);
-
+app.use('/api/customers', customerRoutes);
 app.use('/api/admin-users', adminUsersRoutes);
 
+// (keep the rest exactly as you already had)
+app.use('/api/categories', categoryRoutes);
+app.use('/api/departments', departmentRoutes);
+app.use('/api/regions', regionRoutes);
+app.use('/api/locations', locationRoutes);
+app.use('/api/customer-locations', customerLocationRoutes);
+app.use('/api/sales-reps', salesRepRoutes);
+app.use('/api/routes', routeRoutes);
+app.use('/api/buying-customers', buyingCustomersRoutes);
+app.use('/api/price-tiers', priceTierRoutes);
+app.use('/api/inventory', inventoryRoutes);
+app.use('/api/suppliers', suppliersRouter);
+app.use('/api/uploads', uploadRoutes);
+app.use('/api/analytics', analyticsRoutes);
 app.use('/api/route-customer-portal', routeCustomerPortalRoutes);
-
 app.use('/api/flash-sales', flashSalesRoutes);
-
 app.use('/api/blog', blogRoutes);
-
 app.use('/api/pricing', pricingRoutes);
-
 app.use('/api/pricing-rules', pricingRulesRoutes);
-
 app.use('/api/pricing-groups', pricingGroupsRoutes);
 
 // =====================================================
-// 404 HANDLER
+// ERROR HANDLERS
 // =====================================================
 
 app.use((req, res) => {
-  return res.status(404).json({
+  res.status(404).json({
     success: false,
-    error: 'Route not found',
-    path: req.path,
-    method: req.method,
+    message: 'Route not found',
   });
 });
 
-// =====================================================
-// GLOBAL ERROR HANDLER
-// =====================================================
-
 app.use((err, req, res, next) => {
-  console.error('❌ GLOBAL ERROR:', err);
+  console.error(err);
 
-  return res.status(500).json({
+  res.status(500).json({
     success: false,
-    error: 'Internal server error',
-
-    message:
-      process.env.NODE_ENV === 'development'
-        ? err.message
-        : 'Something went wrong',
+    message: process.env.NODE_ENV === 'development'
+      ? err.message
+      : 'Server error',
   });
 });
 
@@ -248,66 +199,30 @@ app.use((err, req, res, next) => {
 // BACKGROUND JOBS
 // =====================================================
 
-// Auto-fail stale payments every 60 seconds
 setInterval(async () => {
   try {
     await autoFailStalePendingPayments();
-
   } catch (err) {
-    console.error(
-      '❌ Auto-fail payment job error:',
-      err.message
-    );
+    console.error('Payment job error:', err.message);
   }
 }, 60000);
 
-console.log(
-  '✅ Payment auto-fail job started'
-);
-
-// Auto-progress orders every 5 minutes
 setInterval(async () => {
   try {
     await autoProgressOrders();
-
   } catch (err) {
-    console.error(
-      '❌ Order progression job error:',
-      err.message
-    );
+    console.error('Order job error:', err.message);
   }
-}, 5 * 60 * 1000);
-
-console.log(
-  '✅ Order auto-progression job started'
-);
+}, 300000);
 
 // =====================================================
-// START SERVER
+// START SERVER (CRITICAL FIX)
 // =====================================================
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT;
 
-httpServer.listen(PORT, () => {
-  console.log('\n');
-
-  console.log('┌──────────────────────────────────────┐');
-  console.log('│   E-COMMERCE BACKEND STARTED        │');
-  console.log('├──────────────────────────────────────┤');
-
-  console.log(
-    `│ Server: http://localhost:${PORT}`
-      .padEnd(39) + '│'
-  );
-
-  console.log(
-    `│ Environment: ${process.env.NODE_ENV}`
-      .padEnd(39) + '│'
-  );
-
-  console.log('└──────────────────────────────────────┘');
-
-  console.log('\n');
+httpServer.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server running on port ${PORT}`);
 });
 
 module.exports = app;
