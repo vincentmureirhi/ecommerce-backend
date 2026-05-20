@@ -1,0 +1,10 @@
+BEGIN;
+
+ALTER TABLE order_item_pricing_audit
+  ADD COLUMN IF NOT EXISTS order_id INT,
+  ADD COLUMN IF NOT EXISTS product_id INT,
+  ADD COLUMN IF NOT EXISTS quantity INT,
+  ADD COLUMN IF NOT EXISTS line_total NUMERIC(12,2),
+  ADD COLUMN IF NOT EXISTS pricing_locked_at TIMESTAMPTZ;
+
+COMMIT;
