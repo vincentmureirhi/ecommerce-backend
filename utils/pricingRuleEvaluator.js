@@ -266,6 +266,7 @@ function deriveThresholdQty(product, rule) {
  */
 function derivePricingLabel(priceSource, ruleType) {
   if (!priceSource || priceSource === 'unknown_product') return 'unknown_product';
+  if (String(priceSource).startsWith('flash_sale')) return 'flash sale';
   if (priceSource === 'manual_price') return 'manual_price';
   if (priceSource.includes('wholesale')) return `wholesale (${ruleType || 'legacy'})`;
   if (priceSource.endsWith(':tier') || priceSource === 'tier') return `tier (${ruleType || 'legacy'})`;
@@ -273,6 +274,21 @@ function derivePricingLabel(priceSource, ruleType) {
   if (priceSource === 'rule:FIXED_UNIT') return 'fixed';
   if (priceSource.includes('retail') || priceSource === 'retail') return `retail (${ruleType || 'legacy'})`;
   return priceSource;
+}
+
+function normalizeActiveFlashSale(product) {
+  if (!product || product.requires_manual_price) return null;
+
+  const sale = product._activeFlashSale || null;
+  if (!sale || sale.discounted_price == null) return null;
+
+  try {
+    const unitPrice = new Decimal(sale.discounted_price).toDecimalPlaces(2);
+    if (!unitPrice.isFinite() || unitPrice.isNegative()) return null;
+    return { ...sale, unitPrice };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -371,18 +387,25 @@ function evaluateCartPricingWithMeta(items, productMap, tiersMap, ruleTiersMap =
       ruleTiers
     );
 
-    const isWholesaleEligible = priceSource.includes('wholesale');
-    const thresholdQty = deriveThresholdQty(product, rule);
+    const activeFlashSale = normalizeActiveFlashSale(product);
+    const flashSaleApplied = Boolean(activeFlashSale && unitPrice != null);
+    const finalUnitPrice = flashSaleApplied ? activeFlashSale.unitPrice : unitPrice;
+    const finalPriceSource = flashSaleApplied
+      ? `flash_sale:${activeFlashSale.id || 'active'}`
+      : priceSource;
+
+    const isWholesaleEligible = flashSaleApplied ? false : finalPriceSource.includes('wholesale');
+    const thresholdQty = flashSaleApplied ? null : deriveThresholdQty(product, rule);
     const ruleType = rule ? rule.rule_type : 'legacy';
     const ruleName = rule ? (rule.name || null) : null;
     const pricingGroupId = product._pricingGroupId || (rule ? (rule.pricing_group_id || null) : null);
     const pricingGroupName = product._pricingGroupName || null;
-    const pricingLabel = derivePricingLabel(priceSource, ruleType);
+    const pricingLabel = derivePricingLabel(finalPriceSource, ruleType);
 
     return {
       ...item,
-      unit_price: unitPrice,
-      price_source: priceSource,
+      unit_price: finalUnitPrice,
+      price_source: finalPriceSource,
       is_wholesale_eligible: isWholesaleEligible,
       threshold_qty: thresholdQty,
       effective_qty: effectiveQty,
@@ -391,10 +414,15 @@ function evaluateCartPricingWithMeta(items, productMap, tiersMap, ruleTiersMap =
       pricing_group_id: pricingGroupId,
       pricing_group_name: pricingGroupName,
       pricing_label: pricingLabel,
+      flash_sale_id: flashSaleApplied ? activeFlashSale.id || null : null,
+      flash_sale_name: flashSaleApplied ? activeFlashSale.name || null : null,
+      flash_sale_end_date: flashSaleApplied ? activeFlashSale.end_date || null : null,
+      flash_sale_discount_type: flashSaleApplied ? activeFlashSale.discount_type || null : null,
+      flash_sale_discount_value: flashSaleApplied ? activeFlashSale.discount_value || null : null,
+      original_unit_price: flashSaleApplied ? unitPrice : null,
     };
   });
 }
-
 module.exports = {
   RULE_TYPES,
   resolveItemPricing,

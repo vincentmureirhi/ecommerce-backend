@@ -42,9 +42,14 @@ const getAllBlogPosts = async (req, res) => {
     let paramIndex = 1;
 
     let whereClause = '';
+
     // Admin can request all posts (draft + published); storefront only sees published
-    if (all === 'true' && req.user) {
-      // No status filter
+    if (
+      all === 'true' &&
+      req.user &&
+      (req.user.role === 'admin' || req.user.is_admin === true)
+    ) {
+      // No status filter — admins see everything
     } else {
       whereClause = `WHERE bp.status = 'published'`;
     }
@@ -283,10 +288,6 @@ const updateBlogPost = async (req, res) => {
     if (rawSlug && rawSlug.trim()) {
       const baseSlug = generateSlug(rawSlug);
       newSlug = await ensureUniqueSlug(baseSlug, parseInt(id));
-    } else if (title && title.trim()) {
-      // Only auto-regenerate slug if title changed significantly
-      // (keep existing slug by default to avoid breaking links)
-      newSlug = current.slug;
     }
 
     // Auto-set published_at when transitioning to published

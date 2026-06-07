@@ -24,6 +24,18 @@ function toMoney(v, field, { allowNull = false } = {}) {
   return d.toDecimalPlaces(2);
 }
 
+function toPositiveInt(v, field, fallback = 1) {
+  const value = v == null || v === '' ? fallback : v;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`${field} must be an integer >= 1`);
+  return n;
+}
+
+function cleanSellingUnit(value) {
+  const text = String(value || '').trim();
+  return text || 'piece';
+}
+
 function buildAutoSkuThresholdRuleName(productName) {
   return `Wholesale threshold - ${productName}`;
 }
@@ -49,21 +61,17 @@ const getAllProducts = async (req, res) => {
   try {
     const r = await pool.query(`
       SELECT
-        p.*,
+       p.*,
         c.name AS category_name,
         d.name AS department_name,
-        fs.id AS flash_sale_id,
-        fs.name AS flash_sale_name,
-        fs.discount_type,
-        fs.discount_value,
-        fs.end_date AS flash_sale_end_date,
-        CASE
-          WHEN fs.id IS NOT NULL AND fs.discount_type = 'percentage'
-            THEN ROUND(p.retail_price * (1 - fs.discount_value / 100), 2)
-          WHEN fs.id IS NOT NULL AND fs.discount_type = 'fixed'
-            THEN GREATEST(p.retail_price - fs.discount_value, 0)
-          ELSE NULL
-        END AS discounted_price,
+        active_flash_sale.id AS flash_sale_id,
+        active_flash_sale.name AS flash_sale_name,
+        active_flash_sale.discount_type,
+        active_flash_sale.discount_value,
+        active_flash_sale.start_date AS flash_sale_start_date,
+        active_flash_sale.end_date AS flash_sale_end_date,
+        active_flash_sale.discounted_price AS discounted_price,
+        (active_flash_sale.id IS NOT NULL) AS is_flash,
 
         COALESCE(pt.price_tiers, '[]'::json) AS price_tiers,
         pr.rule_type AS pricing_rule_type,
@@ -75,12 +83,31 @@ const getAllProducts = async (req, res) => {
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN departments d ON d.id = p.department_id
-      LEFT JOIN flash_sale_products fsp ON fsp.product_id = p.id
-      LEFT JOIN flash_sales fs
-        ON fs.id = fsp.flash_sale_id
-       AND fs.is_active = TRUE
-       AND fs.start_date <= NOW()
-       AND fs.end_date >= NOW()
+      LEFT JOIN LATERAL (
+        SELECT
+          fs.id,
+          fs.name,
+          fs.discount_type,
+          fs.discount_value,
+          fs.start_date,
+          fs.end_date,
+          CASE
+            WHEN fs.discount_type = 'percentage'
+              THEN ROUND((p.retail_price * (1 - fs.discount_value / 100.0))::numeric, 2)
+            WHEN fs.discount_type = 'fixed'
+              THEN GREATEST((p.retail_price - fs.discount_value)::numeric, 0)
+            ELSE NULL
+          END AS discounted_price
+        FROM flash_sale_products fsp
+        JOIN flash_sales fs
+          ON fs.id = fsp.flash_sale_id
+        WHERE fsp.product_id = p.id
+          AND fs.is_active = TRUE
+          AND fs.start_date <= NOW()
+          AND fs.end_date >= NOW()
+        ORDER BY discounted_price ASC NULLS LAST, fs.end_date ASC, fs.id ASC
+        LIMIT 1
+      ) active_flash_sale ON TRUE
 
       LEFT JOIN (
         SELECT
@@ -117,18 +144,14 @@ const getProductById = async (req, res) => {
         p.*,
         c.name AS category_name,
         d.name AS department_name,
-        fs.id AS flash_sale_id,
-        fs.name AS flash_sale_name,
-        fs.discount_type,
-        fs.discount_value,
-        fs.end_date AS flash_sale_end_date,
-        CASE
-          WHEN fs.id IS NOT NULL AND fs.discount_type = 'percentage'
-            THEN ROUND(p.retail_price * (1 - fs.discount_value / 100), 2)
-          WHEN fs.id IS NOT NULL AND fs.discount_type = 'fixed'
-            THEN GREATEST(p.retail_price - fs.discount_value, 0)
-          ELSE NULL
-        END AS discounted_price,
+        active_flash_sale.id AS flash_sale_id,
+        active_flash_sale.name AS flash_sale_name,
+        active_flash_sale.discount_type,
+        active_flash_sale.discount_value,
+        active_flash_sale.start_date AS flash_sale_start_date,
+        active_flash_sale.end_date AS flash_sale_end_date,
+        active_flash_sale.discounted_price AS discounted_price,
+        (active_flash_sale.id IS NOT NULL) AS is_flash,
 
         COALESCE(
           (
@@ -155,12 +178,31 @@ const getProductById = async (req, res) => {
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN departments d ON d.id = p.department_id
-      LEFT JOIN flash_sale_products fsp ON fsp.product_id = p.id
-      LEFT JOIN flash_sales fs
-        ON fs.id = fsp.flash_sale_id
-       AND fs.is_active = TRUE
-       AND fs.start_date <= NOW()
-       AND fs.end_date >= NOW()
+      LEFT JOIN LATERAL (
+        SELECT
+          fs.id,
+          fs.name,
+          fs.discount_type,
+          fs.discount_value,
+          fs.start_date,
+          fs.end_date,
+          CASE
+            WHEN fs.discount_type = 'percentage'
+              THEN ROUND((p.retail_price * (1 - fs.discount_value / 100.0))::numeric, 2)
+            WHEN fs.discount_type = 'fixed'
+              THEN GREATEST((p.retail_price - fs.discount_value)::numeric, 0)
+            ELSE NULL
+          END AS discounted_price
+        FROM flash_sale_products fsp
+        JOIN flash_sales fs
+          ON fs.id = fsp.flash_sale_id
+        WHERE fsp.product_id = p.id
+          AND fs.is_active = TRUE
+          AND fs.start_date <= NOW()
+          AND fs.end_date >= NOW()
+        ORDER BY discounted_price ASC NULLS LAST, fs.end_date ASC, fs.id ASC
+        LIMIT 1
+      ) active_flash_sale ON TRUE
       LEFT JOIN pricing_rules pr ON pr.id = p.pricing_rule_id
       LEFT JOIN pricing_groups pg ON pg.id = pr.pricing_group_id
       WHERE p.id = $1
@@ -188,6 +230,9 @@ const createProduct = async (req, res) => {
     const requires_manual_price = Boolean(req.body.requires_manual_price);
 
     const image_url = req.body.image_url ? String(req.body.image_url).trim() : null;
+    const min_order_qty = toPositiveInt(req.body.min_order_qty, 'min_order_qty', 1);
+    const order_qty_step = toPositiveInt(req.body.order_qty_step, 'order_qty_step', 1);
+    const selling_unit_label = cleanSellingUnit(req.body.selling_unit_label);
 
     // Profit calculation needs cost_price even if manual pricing product
     const cost_price = toMoney(req.body.cost_price, "cost_price", { allowNull: true });
@@ -224,9 +269,10 @@ const createProduct = async (req, res) => {
         name, sku, category_id, department_id,
         current_stock, cost_price,
         retail_price, wholesale_price, min_qty_wholesale,
-        requires_manual_price, image_url, pricing_rule_id
+        requires_manual_price, image_url, pricing_rule_id,
+        min_order_qty, order_qty_step, selling_unit_label
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
       RETURNING *
       `,
       [
@@ -242,6 +288,9 @@ const createProduct = async (req, res) => {
         requires_manual_price,
         image_url,
         linkedPricingRuleId,
+        min_order_qty,
+        order_qty_step,
+        selling_unit_label,
       ]
     );
 
@@ -276,6 +325,9 @@ const updateProduct = async (req, res) => {
     const requires_manual_price = Boolean(req.body.requires_manual_price);
 
     const image_url = req.body.image_url ? String(req.body.image_url).trim() : null;
+    const min_order_qty = toPositiveInt(req.body.min_order_qty, 'min_order_qty', 1);
+    const order_qty_step = toPositiveInt(req.body.order_qty_step, 'order_qty_step', 1);
+    const selling_unit_label = cleanSellingUnit(req.body.selling_unit_label);
     const cost_price = toMoney(req.body.cost_price, "cost_price", { allowNull: true });
 
     const hasExplicitPricingRuleId = Object.prototype.hasOwnProperty.call(req.body, "pricing_rule_id");
@@ -352,8 +404,11 @@ const updateProduct = async (req, res) => {
         min_qty_wholesale=$9,
         requires_manual_price=$10,
         image_url=$11,
-        pricing_rule_id=$12
-      WHERE id=$13
+        pricing_rule_id=$12,
+        min_order_qty=$13,
+        order_qty_step=$14,
+        selling_unit_label=$15
+      WHERE id=$16
       RETURNING *
       `,
       [
@@ -369,9 +424,13 @@ const updateProduct = async (req, res) => {
         requires_manual_price,
         image_url,
         linkedPricingRuleId,
+        min_order_qty,
+        order_qty_step,
+        selling_unit_label,
         id,
       ]
     );
+
 
     await client.query("COMMIT");
 

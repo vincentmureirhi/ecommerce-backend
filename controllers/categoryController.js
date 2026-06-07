@@ -1,9 +1,20 @@
 const pool = require('../config/database');
 const { handleError, handleSuccess } = require('../utils/errorHandler');
 
+let categoryImageColumnReady = false;
+
+async function ensureCategoryImageColumn() {
+  if (categoryImageColumnReady) return;
+
+  await pool.query('ALTER TABLE categories ADD COLUMN IF NOT EXISTS image_url TEXT');
+  categoryImageColumnReady = true;
+}
+
 // Get all categories with stock value
 const getAllCategories = async (req, res) => {
   try {
+    await ensureCategoryImageColumn();
+
     const { search } = req.query;
 
     let query = `
@@ -38,6 +49,8 @@ const getAllCategories = async (req, res) => {
 // Get single category
 const getCategoryById = async (req, res) => {
   try {
+    await ensureCategoryImageColumn();
+
     const { id } = req.params;
 
     const result = await pool.query(
@@ -66,17 +79,23 @@ const getCategoryById = async (req, res) => {
 // Create category
 const createCategory = async (req, res) => {
   try {
-    const { name, description } = req.body;
+    await ensureCategoryImageColumn();
+
+    const { name, description, image_url } = req.body;
 
     if (!name) {
       return handleError(res, 400, 'name is required');
     }
 
     const result = await pool.query(
-      `INSERT INTO categories (name, description)
-       VALUES ($1, $2)
+      `INSERT INTO categories (name, description, image_url)
+       VALUES ($1, $2, $3)
        RETURNING *`,
-      [name.trim(), description ? description.trim() : null]
+      [
+        name.trim(),
+        description ? description.trim() : null,
+        image_url ? String(image_url).trim() : null,
+      ]
     );
 
     return handleSuccess(res, 201, 'Category created successfully', result.rows[0]);
@@ -84,6 +103,7 @@ const createCategory = async (req, res) => {
     if (err.code === '23505') {
       return handleError(res, 400, 'Category name already exists');
     }
+
     return handleError(res, 500, 'Failed to create category', err);
   }
 };
@@ -91,17 +111,32 @@ const createCategory = async (req, res) => {
 // Update category
 const updateCategory = async (req, res) => {
   try {
+    await ensureCategoryImageColumn();
+
     const { id } = req.params;
-    const { name, description } = req.body;
+    const { name, description, image_url } = req.body;
+
+    const shouldUpdateImage = Object.prototype.hasOwnProperty.call(req.body, 'image_url');
+
+    const normalizedImageUrl = shouldUpdateImage
+      ? (image_url ? String(image_url).trim() : null)
+      : null;
 
     const result = await pool.query(
       `UPDATE categories
        SET name = COALESCE($1, name),
            description = COALESCE($2, description),
+           image_url = CASE WHEN $3 THEN $4 ELSE image_url END,
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = $3
+       WHERE id = $5
        RETURNING *`,
-      [name ? name.trim() : null, description ? description.trim() : null, id]
+      [
+        name ? name.trim() : null,
+        description ? description.trim() : null,
+        shouldUpdateImage,
+        normalizedImageUrl,
+        id,
+      ]
     );
 
     if (result.rows.length === 0) {
@@ -113,6 +148,7 @@ const updateCategory = async (req, res) => {
     if (err.code === '23505') {
       return handleError(res, 400, 'Category name already exists');
     }
+
     return handleError(res, 500, 'Failed to update category', err);
   }
 };
@@ -122,7 +158,6 @@ const deleteCategory = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Check if category has products
     const productsResult = await pool.query(
       'SELECT COUNT(*) as count FROM products WHERE category_id = $1',
       [id]

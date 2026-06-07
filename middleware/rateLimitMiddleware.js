@@ -2,6 +2,18 @@
 
 const rateLimit = require('express-rate-limit');
 
+const apiRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 600,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.path === '/health',
+  message: {
+    success: false,
+    message: 'Too many API requests. Please retry shortly.',
+  },
+});
+
 const routeCustomerUpsertRateLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 30,
@@ -35,8 +47,21 @@ const salesRepRateLimiter = rateLimit({
   },
 });
 
+const orderTrackingRateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 12,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many order tracking attempts. Please retry in a minute.',
+  },
+});
+
 module.exports = {
+  apiRateLimiter,
   routeCustomerUpsertRateLimiter,
   salesRepLoginRateLimiter,
   salesRepRateLimiter,
+  orderTrackingRateLimiter,
 };

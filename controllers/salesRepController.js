@@ -6,6 +6,9 @@ const { handleError, handleSuccess } = require('../utils/errorHandler');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const SALES_REP_TOKEN_EXPIRY = '24h';
+const MAX_ACCEPTABLE_LOCATION_ACCURACY_METERS = 100;
+const MAX_LOCATION_AGE_MS = 10 * 60 * 1000;
+const MAX_FUTURE_LOCATION_DRIFT_MS = 5 * 60 * 1000;
 
 function normalizeNumber(value, fallback = null) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -23,6 +26,25 @@ function normalizeBooleanInput(value, fallback) {
     if (['false', '0', 'no', 'off', 'inactive'].includes(normalized)) return false;
   }
   return fallback;
+}
+
+function onlyDigits(value) {
+  return String(value || '').replace(/\D/g, '');
+}
+
+function normalizeOptionalText(value) {
+  const text = String(value || '').trim();
+  return text || null;
+}
+
+function validateOptionalRange(value, field, min, max) {
+  if (value === null || value === undefined) return value;
+  if (value < min || value > max) {
+    const err = new Error(`${field} must be between ${min} and ${max}`);
+    err.status = 400;
+    throw err;
+  }
+  return value;
 }
 
 function generateTemporaryPassword(length = 12) {
@@ -300,6 +322,12 @@ const saveSalesRepLocation = async (req, res) => {
 
     const lat = normalizeNumber(latitude);
     const lng = normalizeNumber(longitude);
+    const accuracy = normalizeNumber(accuracy_meters);
+    const speed = normalizeNumber(speed_kph);
+    const heading = normalizeNumber(heading_degrees);
+    const battery = normalizeNumber(battery_level);
+    const recordedAt = recorded_at ? new Date(recorded_at) : null;
+    const normalizedSource = normalizeOptionalText(source) || 'web';
 
     if (lat === null || lng === null) {
       return handleError(res, 400, 'latitude and longitude are required');
@@ -307,6 +335,29 @@ const saveSalesRepLocation = async (req, res) => {
 
     if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
       return handleError(res, 400, 'Invalid latitude/longitude range');
+    }
+
+    if (accuracy !== null && (accuracy < 0 || accuracy > MAX_ACCEPTABLE_LOCATION_ACCURACY_METERS)) {
+      return handleError(res, 400, 'GPS accuracy is too low for live sales rep tracking');
+    }
+
+    try {
+      validateOptionalRange(speed, 'speed_kph', 0, 300);
+      validateOptionalRange(heading, 'heading_degrees', 0, 360);
+      validateOptionalRange(battery, 'battery_level', 0, 100);
+    } catch (validationErr) {
+      return handleError(res, validationErr.status || 400, validationErr.message);
+    }
+
+    if (recordedAt && Number.isNaN(recordedAt.getTime())) {
+      return handleError(res, 400, 'recorded_at must be a valid timestamp');
+    }
+
+    if (recordedAt) {
+      const ageMs = Date.now() - recordedAt.getTime();
+      if (ageMs > MAX_LOCATION_AGE_MS || ageMs < -MAX_FUTURE_LOCATION_DRIFT_MS) {
+        return handleError(res, 400, 'Location timestamp is stale or too far in the future');
+      }
     }
 
     const repCheck = await pool.query(
@@ -343,12 +394,12 @@ const saveSalesRepLocation = async (req, res) => {
         id,
         lat,
         lng,
-        normalizeNumber(accuracy_meters),
-        normalizeNumber(speed_kph),
-        normalizeNumber(heading_degrees),
-        normalizeNumber(battery_level),
-        source || 'web',
-        recorded_at || null,
+        accuracy,
+        speed,
+        heading,
+        battery,
+        normalizedSource,
+        recordedAt ? recordedAt.toISOString() : null,
       ]
     );
 
@@ -510,7 +561,7 @@ const createSalesRep = async (req, res) => {
     return handleSuccess(res, 201, 'Sales rep created successfully', {
       sales_rep: normalizeSalesRepResponse(result.rows[0]),
       credentials: {
-        username: result.rows[0].username || result.rows[0].email,
+        username: result.rows[0].username || result.rows[0].email || result.rows[0].phone || result.rows[0].phone_number,
         temporary_password: resolvedTemporaryPassword,
         must_change_password: true,
         handling_warning: 'Store and share this temporary password securely. It is shown only in this response.',
@@ -615,7 +666,7 @@ const resetSalesRepPassword = async (req, res) => {
     return handleSuccess(res, 200, 'Sales rep password reset successfully', {
       sales_rep: normalizeSalesRepResponse(result.rows[0]),
       credentials: {
-        username: result.rows[0].username || result.rows[0].email,
+        username: result.rows[0].username || result.rows[0].email || result.rows[0].phone || result.rows[0].phone_number,
         temporary_password: temporaryPassword,
         must_change_password: true,
         handling_warning: 'Store and share this temporary password securely. It is shown only in this response.',
@@ -633,8 +684,9 @@ const loginSalesRep = async (req, res) => {
   try {
     const { username, email, identifier, password } = req.body;
     const normalizedIdentifier = String(identifier || username || email || '').trim().toLowerCase();
+    const digitIdentifier = onlyDigits(normalizedIdentifier);
     if (!normalizedIdentifier || !password) {
-      return handleError(res, 400, 'identifier (username/email) and password are required');
+      return handleError(res, 400, 'identifier (username/email/phone) and password are required');
     }
     if (!JWT_SECRET) {
       return handleError(res, 500, 'JWT secret is not configured');
@@ -662,9 +714,13 @@ const loginSalesRep = async (req, res) => {
       WHERE
         LOWER(COALESCE(username, '')) = $1
         OR LOWER(COALESCE(email, '')) = $1
+        OR (
+          $2 <> ''
+          AND REGEXP_REPLACE(COALESCE(phone, phone_number, ''), '\\D', '', 'g') = $2
+        )
       LIMIT 1
       `,
-      [normalizedIdentifier]
+      [normalizedIdentifier, digitIdentifier]
     );
 
     if (result.rows.length === 0) {

@@ -775,4 +775,38 @@ const { RULE_TYPES, resolveItemPricing, evaluateCartPricing, evaluateCartPricing
   assert.strictEqual(result[0].pricing_group_name, 'Test Group', 'pricing_group_name is exposed');
 }
 
+// Active flash sale overrides normal retail pricing and exposes sale metadata
+{
+  const product = {
+    id: 240,
+    retail_price: '100',
+    wholesale_price: '70',
+    min_qty_wholesale: 10,
+    requires_manual_price: false,
+    _pricingRule: { id: 130, rule_type: RULE_TYPES.SKU_THRESHOLD, threshold_qty: 10, name: 'Wholesale at 10' },
+    _pricingGroupId: null,
+    _activeFlashSale: {
+      id: 9,
+      name: 'Weekend Flash',
+      discount_type: 'percentage',
+      discount_value: '25',
+      end_date: '2026-05-25T10:00:00.000Z',
+      discounted_price: '75',
+    },
+  };
+  const items = [{ product_id: 240, quantity: 2 }];
+  const productMap = { 240: product };
+
+  const result = evaluateCartPricingWithMeta(items, productMap, {});
+
+  assert.strictEqual(result[0].unit_price.toFixed(2), '75.00');
+  assert.strictEqual(result[0].price_source, 'flash_sale:9');
+  assert.strictEqual(result[0].pricing_label, 'flash sale');
+  assert.strictEqual(result[0].is_wholesale_eligible, false);
+  assert.strictEqual(result[0].threshold_qty, null);
+  assert.strictEqual(result[0].original_unit_price.toFixed(2), '100.00');
+  assert.strictEqual(result[0].flash_sale_id, 9);
+  assert.strictEqual(result[0].flash_sale_name, 'Weekend Flash');
+}
+
 console.log('pricingRuleEvaluator tests passed');

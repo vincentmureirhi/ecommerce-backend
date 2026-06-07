@@ -28,6 +28,11 @@ function normalizePhone(phone) {
   return phoneNumber;
 }
 
+function cleanReference(value) {
+  const text = String(value || '').trim();
+  return text || null;
+}
+
 function deriveRoutePaymentState(totalAmount, amountPaid, dueDate) {
   const total = new Decimal(totalAmount || 0);
   const paid = new Decimal(amountPaid || 0);
@@ -113,7 +118,8 @@ async function syncOrderSettlement(client, orderId) {
       total_amount,
       due_date,
       payment_status,
-      payment_state
+      payment_state,
+      order_status
     FROM orders
     WHERE id = $1
     FOR UPDATE
@@ -150,6 +156,12 @@ async function syncOrderSettlement(client, orderId) {
     paymentState = deriveRoutePaymentState(totalAmount, paidTotal, order.due_date);
   }
 
+  const shouldStartProcessing =
+    order.order_type === 'normal' &&
+    paymentStatus === 'completed' &&
+    (order.order_status || 'pending') === 'pending';
+  const nextOrderStatus = shouldStartProcessing ? 'processing' : order.order_status;
+
   const updateRes = await client.query(
     `
     UPDATE orders
@@ -158,8 +170,13 @@ async function syncOrderSettlement(client, orderId) {
       last_payment_date = $2,
       payment_status = $3,
       payment_state = $4,
+      order_status = $5,
+      status_changed_at = CASE
+        WHEN $6 THEN CURRENT_TIMESTAMP
+        ELSE status_changed_at
+      END,
       updated_at = CURRENT_TIMESTAMP
-    WHERE id = $5
+    WHERE id = $7
     RETURNING *
     `,
     [
@@ -167,6 +184,8 @@ async function syncOrderSettlement(client, orderId) {
       lastPaymentDate,
       paymentStatus,
       paymentState,
+      nextOrderStatus,
+      shouldStartProcessing,
       orderId,
     ]
   );
@@ -598,13 +617,17 @@ const createPayment = async (req, res) => {
     const orderId = asInt(req.body.order_id, 'order_id');
     const amount = asMoney(req.body.amount, 'amount');
     const method = String(req.body.method || '').toLowerCase().trim();
-    const reference = req.body.reference ? String(req.body.reference).trim() : null;
+    const reference = cleanReference(req.body.reference || req.body.mpesa_reference || req.body.mpesa_receipt);
     const notes = req.body.notes ? String(req.body.notes).trim() : null;
     const customerPhone = req.body.customer_phone ? normalizePhone(req.body.customer_phone) : null;
 
     const allowedMethods = new Set(['cash', 'mpesa', 'bank', 'card', 'other']);
     if (!allowedMethods.has(method)) {
       return handleError(res, 400, `method must be one of: ${Array.from(allowedMethods).join(', ')}`);
+    }
+
+    if (method === 'mpesa' && !reference) {
+      return handleError(res, 400, 'M-Pesa manual payments require a receipt/reference code.');
     }
 
     await client.query('BEGIN');
@@ -837,14 +860,23 @@ const reconcilePayment = async (req, res) => {
       nextReceivedAmount = new Decimal(payment.amount || 0).toFixed(2);
     }
 
+    const nextMpesaReceipt = cleanReference(mpesa_receipt) || cleanReference(payment.mpesa_receipt);
+    const nextReference = cleanReference(reference) || cleanReference(payment.reference);
+    const isCompletion = nextStatus === 'completed' || nextStatus === 'manually_resolved';
+
+    if (isCompletion && !nextMpesaReceipt && !nextReference) {
+      await client.query('ROLLBACK');
+      return handleError(res, 400, 'Completing a payment manually requires an M-Pesa receipt or reference code.');
+    }
+
     const nextReconciliationStatus =
       reconciliation_status ||
-      (nextStatus === 'completed' || nextStatus === 'manually_resolved'
+      (isCompletion
         ? 'manual_override'
         : payment.reconciliation_status || 'manual_review');
 
     const completedAt =
-      nextStatus === 'completed' || nextStatus === 'manually_resolved'
+      isCompletion
         ? (payment.completed_at || new Date().toISOString())
         : null;
 
@@ -854,8 +886,8 @@ const reconcilePayment = async (req, res) => {
       SET
         status = $1,
         received_amount = $2,
-        mpesa_receipt = COALESCE($3, mpesa_receipt),
-        reference = COALESCE($4, reference),
+        mpesa_receipt = $3,
+        reference = $4
         failure_reason = $5,
         manual_notes = COALESCE($6, manual_notes),
         reconciliation_status = $7,
@@ -868,8 +900,8 @@ const reconcilePayment = async (req, res) => {
       [
         nextStatus,
         nextReceivedAmount,
-        mpesa_receipt || null,
-        reference || null,
+        nextMpesaReceipt,
+        nextReference,
         failure_reason || null,
         manual_notes || null,
         nextReconciliationStatus,

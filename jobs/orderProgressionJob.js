@@ -5,8 +5,8 @@ const pool = require('../config/database');
 // processing -> dispatched after this many hours without a manual update
 const PROCESSING_TO_DISPATCHED_HOURS = 4;
 
-// dispatched -> completed after this many hours without a manual update
-const DISPATCHED_TO_COMPLETED_HOURS = 8;
+// // dispatched -> completed after this many hours without a manual update
+const DISPATCHED_TO_COMPLETED_HOURS = 4;
 
 /**
  * Auto-advance orders that have been sitting in an intermediate status too long.

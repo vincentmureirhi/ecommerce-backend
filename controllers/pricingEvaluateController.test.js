@@ -115,10 +115,17 @@ function createRes() {
           pricing_group_id: null,
           pricing_group_name: null,
           pricing_label: 'wholesale (SKU_THRESHOLD)',
+          flash_sale_id: null,
+          flash_sale_name: null,
+          flash_sale_end_date: null,
+          flash_sale_discount_type: null,
+          flash_sale_discount_value: null,
+          original_unit_price: null,
         },
       ],
     });
   }
+
 
   console.log('pricingEvaluateController tests passed');
 })().catch((err) => {

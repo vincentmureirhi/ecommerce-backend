@@ -5,6 +5,7 @@ const router = express.Router();
 const orderController = require('../controllers/orderController');
 const { verifyToken, requireAdmin } = require('../middleware/authMiddleware');
 const { auditPriceChange } = require('../middleware/auditMiddleware');
+const { orderTrackingRateLimiter } = require('../middleware/rateLimitMiddleware');
 
 // PUBLIC — GUEST CHECKOUT (no auth required)
 router.post(
@@ -22,8 +23,10 @@ router.post(
 // PUBLIC ORDER TRACKING
 router.get(
   '/track',
+  orderTrackingRateLimiter,
   orderController.trackPublicOrder
 );
+
 
 // ADMIN ORDER CREATION
 router.post(

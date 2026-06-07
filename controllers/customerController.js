@@ -530,6 +530,10 @@ const upsertRouteCustomer = async (req, res) => {
   try {
     const {
       customer_id,
+      customer_name,
+      customer_phone,
+      customer_email,
+      customer_location_id,
       name,
       email,
       phone,
@@ -541,8 +545,18 @@ const upsertRouteCustomer = async (req, res) => {
       is_active,
     } = req.body;
 
-    const normalizedName = String(name || '').trim();
-    const normalizedPhone = String(phone || '').trim();
+    const effectiveName = name ?? customer_name;
+    const effectivePhone = phone ?? customer_phone;
+    const effectiveEmail = email ?? customer_email;
+    const effectiveLocationId = location_id ?? customer_location_id;
+    const effectiveSalesRepId =
+      req.user?.role === 'sales_rep' && req.user?.sales_rep_id
+        ? req.user.sales_rep_id
+        : sales_rep_id;
+
+    const normalizedName = String(effectiveName || '').trim();
+    const normalizedPhone = String(effectivePhone || '').trim();
+
 
     if (!normalizedName) {
       return res.status(400).json({
@@ -620,11 +634,11 @@ const upsertRouteCustomer = async (req, res) => {
         `,
         [
           normalizedName,
-          email ? String(email).trim() : null,
+          effectiveEmail ? String(effectiveEmail).trim() : null,
           normalizedPhone,
           address ? String(address).trim() : null,
-          location_id || null,
-          sales_rep_id || null,
+          effectiveLocationId || null,
+          effectiveSalesRepId || null,
           route_area ? String(route_area).trim() : null,
           route_notes ? String(route_notes).trim() : null,
           is_active === undefined ? null : Boolean(is_active),
@@ -655,11 +669,11 @@ const upsertRouteCustomer = async (req, res) => {
         `,
         [
           normalizedName,
-          email ? String(email).trim() : null,
+          effectiveEmail ? String(effectiveEmail).trim() : null,
           normalizedPhone,
           address ? String(address).trim() : null,
-          location_id || null,
-          sales_rep_id || null,
+          effectiveLocationId || null,
+          effectiveSalesRepId || null,
           route_area ? String(route_area).trim() : null,
           route_notes ? String(route_notes).trim() : null,
           is_active === undefined ? null : Boolean(is_active),

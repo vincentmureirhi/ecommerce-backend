@@ -56,14 +56,16 @@ function normalizeEvaluationItems(items) {
 function mapPricingEvaluationItems(evaluatedItems) {
   const safeItems = Array.isArray(evaluatedItems) ? evaluatedItems : [];
 
-  return safeItems.map((item) => {
+ return safeItems.map((item) => {
     const unitPrice = normalizeUnitPrice(item.unit_price);
+    const originalUnitPrice = normalizeUnitPrice(item.original_unit_price);
     const lineTotal =
       unitPrice != null
         ? roundMoney(new Decimal(unitPrice).mul(Number(item.quantity || 0)))
         : null;
 
     return {
+            rule_name: item.rule_name || null,
       product_id: item.product_id,
       quantity: item.quantity,
       unit_price: unitPrice,
@@ -76,6 +78,13 @@ function mapPricingEvaluationItems(evaluatedItems) {
       pricing_group_id: item.pricing_group_id || null,
       pricing_group_name: item.pricing_group_name || null,
       pricing_label: item.pricing_label,
+      flash_sale_id: item.flash_sale_id || null,
+      flash_sale_name: item.flash_sale_name || null,
+      flash_sale_end_date: item.flash_sale_end_date || null,
+      flash_sale_discount_type: item.flash_sale_discount_type || null,
+      flash_sale_discount_value:
+        item.flash_sale_discount_value != null ? Number(item.flash_sale_discount_value) : null,
+      original_unit_price: originalUnitPrice,
     };
   });
 }

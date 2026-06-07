@@ -48,6 +48,24 @@ function assertWholesaleEligibility(pricingMode, evalItem, productId) {
   }
 }
 
+function assertProductOrderQuantity(product, quantity) {
+  const minOrderQty = Math.max(1, Number(product.min_order_qty || 1));
+  const step = Math.max(1, Number(product.order_qty_step || 1));
+  const label = product.selling_unit_label || 'piece';
+
+  if (quantity < minOrderQty) {
+    throw new OrderValidationError(
+      `${product.name || `Product ${product.id}`} must be ordered in at least ${minOrderQty} ${label}${minOrderQty === 1 ? '' : 's'}.`
+    );
+  }
+
+  if ((quantity - minOrderQty) % step !== 0) {
+    throw new OrderValidationError(
+      `${product.name || `Product ${product.id}`} must be ordered in steps of ${step} after the minimum of ${minOrderQty}.`
+    );
+  }
+}
+
 const VALID_ORDER_TYPES = new Set(['normal', 'route']);
 const VALID_ORDER_STATUSES = new Set(['pending', 'processing', 'dispatched', 'completed', 'cancelled']);
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -64,6 +82,33 @@ function roundMoney(value) {
 function normalizeText(value) {
   const text = String(value ?? '').trim();
   return text || null;
+}
+
+function getPhoneLookupVariants(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  const variants = new Set();
+
+  if (digits) variants.add(digits);
+  if (digits.length === 9) {
+    variants.add(`254${digits}`);
+    variants.add(`0${digits}`);
+  }
+  if (digits.length === 10 && digits.startsWith('0')) {
+    variants.add(`254${digits.slice(1)}`);
+    variants.add(digits.slice(1));
+  }
+  if (digits.length === 12 && digits.startsWith('254')) {
+    variants.add(`0${digits.slice(3)}`);
+    variants.add(digits.slice(3));
+  }
+
+  return Array.from(variants).filter(Boolean);
+}
+
+function maskPhone(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  if (digits.length <= 4) return digits ? '****' : null;
+  return `${'*'.repeat(Math.max(4, digits.length - 4))}${digits.slice(-4)}`;
 }
 
 function normalizeWorkflowType(value) {
@@ -187,6 +232,9 @@ async function fetchValidatedProduct(client, productId) {
       retail_price,
       wholesale_price,
       min_qty_wholesale,
+      min_order_qty,
+      order_qty_step,
+      selling_unit_label,
       requires_manual_price,
       current_stock
     FROM products
@@ -341,14 +389,47 @@ async function loadPricingContext(client, productIds) {
     SELECT
       p.id, p.name, p.sku,
       p.retail_price, p.wholesale_price, p.min_qty_wholesale,
+      p.min_order_qty, p.order_qty_step, p.selling_unit_label,
       p.requires_manual_price, p.current_stock, p.pricing_rule_id,
       pr.rule_type      AS pricing_rule_type,
       pr.threshold_qty  AS pricing_rule_threshold_qty,
       pr.name           AS pricing_rule_name,
-      pr.pricing_group_id AS pricing_rule_group_id
+      pr.pricing_group_id AS pricing_rule_group_id,
+      active_flash_sale.id AS flash_sale_id,
+      active_flash_sale.name AS flash_sale_name,
+      active_flash_sale.discount_type AS flash_sale_discount_type,
+      active_flash_sale.discount_value AS flash_sale_discount_value,
+      active_flash_sale.start_date AS flash_sale_start_date,
+      active_flash_sale.end_date AS flash_sale_end_date,
+      active_flash_sale.discounted_price AS flash_sale_discounted_price
     FROM products p
     LEFT JOIN pricing_rules pr
       ON pr.id = p.pricing_rule_id AND pr.is_active = TRUE
+    LEFT JOIN LATERAL (
+      SELECT
+        fs.id,
+        fs.name,
+        fs.discount_type,
+        fs.discount_value,
+        fs.start_date,
+        fs.end_date,
+        CASE
+          WHEN fs.discount_type = 'percentage'
+            THEN ROUND((p.retail_price * (1 - fs.discount_value / 100.0))::numeric, 2)
+          WHEN fs.discount_type = 'fixed'
+            THEN GREATEST((p.retail_price - fs.discount_value)::numeric, 0)
+          ELSE NULL
+        END AS discounted_price
+      FROM flash_sale_products fsp
+      JOIN flash_sales fs
+        ON fs.id = fsp.flash_sale_id
+      WHERE fsp.product_id = p.id
+        AND fs.is_active = TRUE
+        AND fs.start_date <= NOW()
+        AND fs.end_date >= NOW()
+      ORDER BY discounted_price ASC NULLS LAST, fs.end_date ASC, fs.id ASC
+      LIMIT 1
+    ) active_flash_sale ON TRUE
     WHERE p.id = ANY($1)
     `,
     [productIds]
@@ -372,6 +453,18 @@ async function loadPricingContext(client, productIds) {
           : null,
       _pricingGroupId: null,
       _pricingGroupName: null,
+      _activeFlashSale:
+        row.flash_sale_id != null
+          ? {
+              id: row.flash_sale_id,
+              name: row.flash_sale_name,
+              discount_type: row.flash_sale_discount_type,
+              discount_value: row.flash_sale_discount_value,
+              start_date: row.flash_sale_start_date,
+              end_date: row.flash_sale_end_date,
+              discounted_price: row.flash_sale_discounted_price,
+            }
+          : null,
     };
     if (row.pricing_rule_id != null) ruleIds.add(row.pricing_rule_id);
   }
@@ -659,13 +752,13 @@ const getOrderById = async (req, res) => {
         oi.price_source,
         oi.pricing_locked_at,
         oi.created_at,
-        p.name AS product_name,
+        COALESCE(p.name, '[Product #' || oi.product_id || ' — deleted]') AS product_name,
         p.sku,
         p.image_url,
         oi.price_at_purchase AS unit_price,
         COALESCE(oi.line_total, oi.quantity * oi.price_at_purchase) AS total_price
       FROM order_items oi
-      JOIN products p ON oi.product_id = p.id
+      LEFT JOIN products p ON oi.product_id = p.id
       WHERE oi.order_id = $1
       ORDER BY oi.id ASC
       `,
@@ -780,6 +873,7 @@ const guestCheckout = async (req, res) => {
       if (!productMap[item.product_id]) {
         throw new Error(`Product does not exist: ${item.product_id}`);
       }
+      assertProductOrderQuantity(productMap[item.product_id], item.quantity);
     }
 
     // Server-side price resolution via pricing rule evaluator.
@@ -1098,6 +1192,7 @@ const createOrder = async (req, res) => {
       if (!productMap[item.product_id]) {
         throw new Error(`Product does not exist: ${item.product_id}`);
       }
+      assertProductOrderQuantity(productMap[item.product_id], item.quantity);
     }
 
     // Server-side price resolution via pricing rule evaluator.
@@ -1319,6 +1414,9 @@ const updateOrderStatus = async (req, res) => {
       amount_paid,
       due_date,
       notes,
+      payment_reference,
+      mpesa_reference,
+      mpesa_receipt,
     } = req.body;
 
     const currentResult = await pool.query(
@@ -1379,6 +1477,21 @@ const updateOrderStatus = async (req, res) => {
       }
     }
 
+    const manualReference = normalizeText(payment_reference || mpesa_reference || mpesa_receipt);
+    const paymentAmountIncreased = nextAmountPaid > currentAmountPaid;
+    const paymentMarkedComplete =
+      current.order_type === 'normal' &&
+      nextPaymentStatus === 'completed' &&
+      (current.payment_status || 'pending') !== 'completed';
+
+    if ((paymentAmountIncreased || paymentMarkedComplete) && !manualReference) {
+      return handleError(
+        res,
+        400,
+        'Manual payment updates require an M-Pesa receipt/reference code. Use the Payments screen for full reconciliation.'
+      );
+    }
+
     const nextPaymentState =
       current.order_type === 'route'
         ? deriveRoutePaymentState(totalAmount, nextAmountPaid, nextDueDate)
@@ -1388,6 +1501,10 @@ const updateOrderStatus = async (req, res) => {
       nextAmountPaid > currentAmountPaid
         ? new Date().toISOString()
         : current.last_payment_date;
+    const nextNotes = normalizeText(notes);
+    const settlementNote = manualReference
+      ? [nextNotes, `Manual payment reference: ${manualReference}`].filter(Boolean).join('\n')
+      : nextNotes;
 
     const result = await pool.query(
       `
@@ -1414,7 +1531,7 @@ const updateOrderStatus = async (req, res) => {
         roundMoney(nextAmountPaid),
         nextDueDate,
         nextLastPaymentDate,
-        notes ? notes.trim() : null,
+        settlementNote,
         id,
       ]
     );
@@ -1521,12 +1638,12 @@ const getOrderForPrint = async (req, res) => {
         oi.price_source,
         oi.pricing_locked_at,
         oi.created_at,
-        p.name AS product_name,
+        COALESCE(p.name, '[Product #' || oi.product_id || ' — deleted]') AS product_name,
         p.sku,
         oi.price_at_purchase AS unit_price,
         COALESCE(oi.line_total, oi.quantity * oi.price_at_purchase) AS total_price
       FROM order_items oi
-      JOIN products p ON oi.product_id = p.id
+      LEFT JOIN products p ON oi.product_id = p.id
       WHERE oi.order_id = $1
       ORDER BY oi.id ASC
       `,
@@ -2085,10 +2202,12 @@ const trackPublicOrder = async (req, res) => {
   try {
     const orderNumber = String(req.query.order_number || '').trim();
     const phoneDigits = String(req.query.customer_phone || '').replace(/\D/g, '');
+    const phoneVariants = getPhoneLookupVariants(req.query.customer_phone);
 
     if (!orderNumber || !phoneDigits) {
       return handleError(res, 400, 'order_number and customer_phone are required');
     }
+
 
     const orderResult = await pool.query(
       `
@@ -2100,13 +2219,14 @@ const trackPublicOrder = async (req, res) => {
       FROM orders o
       LEFT JOIN order_items oi ON oi.order_id = o.id
       WHERE o.order_number = $1
-        AND regexp_replace(COALESCE(o.customer_phone, ''), '\D', '', 'g') = $2
+        AND regexp_replace(COALESCE(o.customer_phone, ''), '\D', '', 'g') = ANY($2::text[])
       GROUP BY o.id
       ORDER BY o.id DESC
       LIMIT 1
       `,
-      [orderNumber, phoneDigits]
+      [orderNumber, phoneVariants]
     );
+
 
     if (orderResult.rows.length === 0) {
       return handleError(res, 404, 'Order not found for the provided details');
@@ -2121,17 +2241,17 @@ const trackPublicOrder = async (req, res) => {
         oi.quantity,
         oi.price_at_purchase,
         COALESCE(oi.line_total, oi.quantity * oi.price_at_purchase) AS line_total,
-        p.name AS product_name,
+        COALESCE(p.name, '[Product #' || oi.product_id || ' — deleted]') AS product_name,
         p.sku
       FROM order_items oi
-      JOIN products p ON p.id = oi.product_id
+      LEFT JOIN products p ON p.id = oi.product_id
       WHERE oi.order_id = $1
       ORDER BY oi.id ASC
       `,
       [order.id]
     );
 
-    order.items = itemsResult.rows.map((item) => ({
+    const items = itemsResult.rows.map((item) => ({
       ...item,
       price_at_purchase: roundMoney(item.price_at_purchase),
       line_total: roundMoney(item.line_total),
@@ -2145,7 +2265,31 @@ const trackPublicOrder = async (req, res) => {
     order.current_tracking_stage = trackingStage.current_tracking_stage;
     order.tracking_summary = trackingStage.tracking_summary;
 
-    return handleSuccess(res, 200, 'Order tracking retrieved successfully', order);
+    const publicOrder = {
+      id: order.id,
+      order_number: order.order_number,
+      order_type: order.order_type,
+      customer_name: order.customer_name,
+      customer_phone_masked: maskPhone(order.customer_phone),
+      total_amount: order.total_amount,
+      amount_paid: order.amount_paid,
+      balance_due: order.balance_due,
+      payment_status: order.payment_status,
+      payment_state: order.payment_state,
+      order_status: order.order_status,
+      settlement_label: order.settlement_label,
+      current_tracking_stage: order.current_tracking_stage,
+      tracking_summary: order.tracking_summary,
+      item_count: Number(order.item_count || items.length || 0),
+      total_items: Number(order.total_items || 0),
+      created_at: order.created_at,
+      updated_at: order.updated_at,
+      status_changed_at: order.status_changed_at,
+      last_payment_date: order.last_payment_date,
+      items,
+    };
+
+    return handleSuccess(res, 200, 'Order tracking retrieved successfully', publicOrder);
   } catch (err) {
     console.error('trackPublicOrder error:', err.message);
     return handleError(res, 500, 'Failed to track order', err);

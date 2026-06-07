@@ -16,6 +16,7 @@ const { initializeWebSocket } = require('./websocket');
 // ===== JOBS =====
 const { autoFailStalePendingPayments } = require('./jobs/paymentAutoFail');
 const { autoProgressOrders } = require('./jobs/orderProgressionJob');
+const { apiRateLimiter } = require('./middleware/rateLimitMiddleware');
 
 // ===== ROUTES =====
 const authRoutes = require('./routes/auth');
@@ -40,6 +41,7 @@ const analyticsRoutes = require('./routes/analytics');
 const routeCustomerPortalRoutes = require('./routes/routeCustomerPortal');
 const flashSalesRoutes = require('./routes/flashSales');
 const blogRoutes = require('./routes/blog');
+const termsRoutes = require('./routes/terms');
 const pricingRoutes = require('./routes/pricing');
 const pricingRulesRoutes = require('./routes/pricingRules');
 const pricingGroupsRoutes = require('./routes/pricingGroups');
@@ -57,13 +59,30 @@ global.io = require('./websocket');
 
 const allowedOrigins = [
   'http://localhost:5173',
+  'http://localhost:5174',
   'http://localhost:8080',
   'http://127.0.0.1:5173',
+  'http://127.0.0.1:5174',
   'http://127.0.0.1:8080',
 
   // ✅ YOUR FRONTEND (VERCEL)
   'https://ecommerce-admin-seven-ashy.vercel.app',
+  'https://xpose-distributors.vercel.app',
 ];
+
+for (const value of [
+  process.env.CORS_ORIGINS,
+  process.env.ADMIN_URL,
+  process.env.STOREFRONT_URL,
+  process.env.FRONTEND_URL,
+]) {
+  if (!value) continue;
+  value
+    .split(',')
+    .map((origin) => origin.trim().replace(/\/$/, ''))
+    .filter(Boolean)
+    .forEach((origin) => allowedOrigins.push(origin));
+}
 
 const corsOptions = {
   origin: function (origin, callback) {
@@ -141,9 +160,12 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
+
 // =====================================================
 // ROUTES
 // =====================================================
+
+app.use('/api', apiRateLimiter);
 
 app.use('/api/auth', authRoutes);
 app.use('/api/products', productRoutes);
@@ -169,6 +191,7 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api/route-customer-portal', routeCustomerPortalRoutes);
 app.use('/api/flash-sales', flashSalesRoutes);
 app.use('/api/blog', blogRoutes);
+app.use('/api/terms', termsRoutes);
 app.use('/api/pricing', pricingRoutes);
 app.use('/api/pricing-rules', pricingRulesRoutes);
 app.use('/api/pricing-groups', pricingGroupsRoutes);
