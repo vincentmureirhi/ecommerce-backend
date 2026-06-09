@@ -16,6 +16,7 @@ const { initializeWebSocket } = require('./websocket');
 // ===== JOBS =====
 const { autoFailStalePendingPayments } = require('./jobs/paymentAutoFail');
 const { autoProgressOrders } = require('./jobs/orderProgressionJob');
+const { processQueuedSmsNotifications } = require('./jobs/smsOutboxJob');
 const { apiRateLimiter } = require('./middleware/rateLimitMiddleware');
 
 // ===== ROUTES =====
@@ -160,7 +161,6 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
-
 // =====================================================
 // ROUTES
 // =====================================================
@@ -237,6 +237,17 @@ setInterval(async () => {
     console.error('Order job error:', err.message);
   }
 }, 300000);
+
+setInterval(async () => {
+  try {
+    const result = await processQueuedSmsNotifications();
+    if (result.processed || result.sent || result.failed) {
+      console.log('SMS job result:', result);
+    }
+  } catch (err) {
+    console.error('SMS job error:', err.message);
+  }
+}, Number(process.env.SMS_JOB_INTERVAL_MS || 60000));
 
 // =====================================================
 // START SERVER (CRITICAL FIX)

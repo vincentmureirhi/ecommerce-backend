@@ -5,6 +5,7 @@ const pool = require('../config/database');
 const { handleError, handleSuccess } = require('../utils/errorHandler');
 const Decimal = require('decimal.js');
 const moment = require('moment');
+const { enqueuePaymentConfirmedSms } = require('../services/smsService');
 
 function asInt(v, name) {
   const n = Number(v);
@@ -62,6 +63,21 @@ function inferFailedStatus(resultDesc = '') {
   return 'failed';
 }
 
+async function safeEnqueuePaymentConfirmedSmsInTransaction(client, order, options = {}) {
+  if (!order?.sms_should_notify_payment_confirmed) return;
+
+  try {
+    await client.query('SAVEPOINT sms_enqueue_payment_confirmed');
+    await enqueuePaymentConfirmedSms(client, order, options);
+    await client.query('RELEASE SAVEPOINT sms_enqueue_payment_confirmed');
+  } catch (smsErr) {
+    try {
+      await client.query('ROLLBACK TO SAVEPOINT sms_enqueue_payment_confirmed');
+    } catch (_) {}
+    console.error('Failed to queue payment confirmation SMS:', smsErr.message);
+  }
+}
+
 async function getAccessToken(retries = 3) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -114,12 +130,16 @@ async function syncOrderSettlement(client, orderId) {
     `
     SELECT
       id,
+      order_number,
       order_type,
+      customer_name,
+      customer_phone,
       total_amount,
       due_date,
       payment_status,
       payment_state,
-      order_status
+      order_status,
+      amount_paid
     FROM orders
     WHERE id = $1
     FOR UPDATE
@@ -131,6 +151,10 @@ async function syncOrderSettlement(client, orderId) {
 
   const order = orderRes.rows[0];
   const totalAmount = new Decimal(order.total_amount || 0);
+  const wasPaymentConfirmed =
+    order.order_type === 'normal'
+      ? order.payment_status === 'completed'
+      : order.payment_state === 'paid';
 
   const paymentAgg = await client.query(
     `
@@ -155,6 +179,11 @@ async function syncOrderSettlement(client, orderId) {
   } else {
     paymentState = deriveRoutePaymentState(totalAmount, paidTotal, order.due_date);
   }
+
+  const isPaymentConfirmed =
+    order.order_type === 'normal'
+      ? paymentStatus === 'completed'
+      : paymentState === 'paid';
 
   const shouldStartProcessing =
     order.order_type === 'normal' &&
@@ -190,7 +219,10 @@ async function syncOrderSettlement(client, orderId) {
     ]
   );
 
-  return updateRes.rows[0];
+  return {
+    ...updateRes.rows[0],
+    sms_should_notify_payment_confirmed: !wasPaymentConfirmed && isPaymentConfirmed,
+  };
 }
 
 const initiateSTKPush = async (req, res) => {
@@ -466,7 +498,8 @@ const mpesaCallback = async (req, res) => {
       );
 
       if (payment.order_id) {
-        await syncOrderSettlement(client, payment.order_id);
+        const settledOrder = await syncOrderSettlement(client, payment.order_id);
+        await safeEnqueuePaymentConfirmedSmsInTransaction(client, settledOrder, { paymentId: payment.id });
       }
 
       await client.query('COMMIT');
@@ -707,7 +740,8 @@ const createPayment = async (req, res) => {
       ]
     );
 
-    await syncOrderSettlement(client, orderId);
+    const settledOrder = await syncOrderSettlement(client, orderId);
+    await safeEnqueuePaymentConfirmedSmsInTransaction(client, settledOrder, { paymentId: insertRes.rows[0].id });
     await client.query('COMMIT');
 
     const payment = await fetchPaymentWithOrder(client, insertRes.rows[0].id);
@@ -887,7 +921,7 @@ const reconcilePayment = async (req, res) => {
         status = $1,
         received_amount = $2,
         mpesa_receipt = $3,
-        reference = $4
+        reference = $4,
         failure_reason = $5,
         manual_notes = COALESCE($6, manual_notes),
         reconciliation_status = $7,
@@ -912,7 +946,8 @@ const reconcilePayment = async (req, res) => {
     );
 
     if (payment.order_id) {
-      await syncOrderSettlement(client, payment.order_id);
+      const settledOrder = await syncOrderSettlement(client, payment.order_id);
+      await safeEnqueuePaymentConfirmedSmsInTransaction(client, settledOrder, { paymentId });
     }
 
     await client.query('COMMIT');

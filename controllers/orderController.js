@@ -6,6 +6,7 @@ const { handleError, handleSuccess } = require('../utils/errorHandler');
 const generateOrderNumber = require('../utils/generateOrderNumber');
 
 const { evaluateCartPricingWithMeta } = require('../utils/pricingRuleEvaluator');
+const { enqueuePaymentConfirmedSms } = require('../services/smsService');
 
 /**
  * Business-rule validation error for order creation.
@@ -1536,7 +1537,17 @@ const updateOrderStatus = async (req, res) => {
       ]
     );
 
-    return handleSuccess(res, 200, 'Order updated successfully', enrichOrder(result.rows[0]));
+    const updatedOrder = enrichOrder(result.rows[0]);
+
+    if (paymentMarkedComplete) {
+      try {
+        await enqueuePaymentConfirmedSms(pool, updatedOrder);
+      } catch (smsErr) {
+        console.error('Failed to queue payment confirmation SMS:', smsErr.message);
+      }
+    }
+
+    return handleSuccess(res, 200, 'Order updated successfully', updatedOrder);
   } catch (err) {
     console.error('updateOrderStatus error:', err.message);
     return handleError(res, 500, 'Failed to update order', err);
@@ -2208,7 +2219,6 @@ const trackPublicOrder = async (req, res) => {
       return handleError(res, 400, 'order_number and customer_phone are required');
     }
 
-
     const orderResult = await pool.query(
       `
       SELECT
@@ -2226,7 +2236,6 @@ const trackPublicOrder = async (req, res) => {
       `,
       [orderNumber, phoneVariants]
     );
-
 
     if (orderResult.rows.length === 0) {
       return handleError(res, 404, 'Order not found for the provided details');
