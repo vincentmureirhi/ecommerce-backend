@@ -6,8 +6,8 @@ const { handleError, handleSuccess } = require('../utils/errorHandler');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const SALES_REP_TOKEN_EXPIRY = '24h';
-const MAX_ACCEPTABLE_LOCATION_ACCURACY_METERS = 100;
-const MAX_LOCATION_AGE_MS = 10 * 60 * 1000;
+const MAX_ACCEPTABLE_LOCATION_ACCURACY_METERS = 1000;
+const MAX_LOCATION_AGE_MS = 15 * 60 * 1000;
 const MAX_FUTURE_LOCATION_DRIFT_MS = 5 * 60 * 1000;
 
 function normalizeNumber(value, fallback = null) {
