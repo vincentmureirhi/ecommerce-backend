@@ -6,9 +6,9 @@ const { handleError, handleSuccess } = require('../utils/errorHandler');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const SALES_REP_TOKEN_EXPIRY = '24h';
-const MAX_ACCEPTABLE_LOCATION_ACCURACY_METERS = 1000;
-const MAX_LOCATION_AGE_MS = 15 * 60 * 1000;
-const MAX_FUTURE_LOCATION_DRIFT_MS = 5 * 60 * 1000;
+const MAX_ACCEPTABLE_LOCATION_ACCURACY_METERS = 5000;
+const MAX_LOCATION_AGE_MS = 60 * 60 * 1000;
+const MAX_FUTURE_LOCATION_DRIFT_MS = 15 * 60 * 1000;
 
 function normalizeNumber(value, fallback = null) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -44,6 +44,12 @@ function validateOptionalRange(value, field, min, max) {
     err.status = 400;
     throw err;
   }
+  return value;
+}
+
+function cleanOptionalRange(value, min, max) {
+  if (value === null || value === undefined) return null;
+  if (value < min || value > max) return null;
   return value;
 }
 
@@ -322,11 +328,11 @@ const saveSalesRepLocation = async (req, res) => {
 
     const lat = normalizeNumber(latitude);
     const lng = normalizeNumber(longitude);
-    const accuracy = normalizeNumber(accuracy_meters);
-    const speed = normalizeNumber(speed_kph);
-    const heading = normalizeNumber(heading_degrees);
-    const battery = normalizeNumber(battery_level);
-    const recordedAt = recorded_at ? new Date(recorded_at) : null;
+    let accuracy = normalizeNumber(accuracy_meters);
+    let speed = normalizeNumber(speed_kph);
+    let heading = normalizeNumber(heading_degrees);
+    let battery = normalizeNumber(battery_level);
+    let recordedAt = recorded_at ? new Date(recorded_at) : null;
     const normalizedSource = normalizeOptionalText(source) || 'web';
 
     if (lat === null || lng === null) {
@@ -337,26 +343,19 @@ const saveSalesRepLocation = async (req, res) => {
       return handleError(res, 400, 'Invalid latitude/longitude range');
     }
 
-    if (accuracy !== null && (accuracy < 0 || accuracy > MAX_ACCEPTABLE_LOCATION_ACCURACY_METERS)) {
-      return handleError(res, 400, 'GPS accuracy is too low for live sales rep tracking');
-    }
-
-    try {
-      validateOptionalRange(speed, 'speed_kph', 0, 300);
-      validateOptionalRange(heading, 'heading_degrees', 0, 360);
-      validateOptionalRange(battery, 'battery_level', 0, 100);
-    } catch (validationErr) {
-      return handleError(res, validationErr.status || 400, validationErr.message);
-    }
+    accuracy = cleanOptionalRange(accuracy, 0, MAX_ACCEPTABLE_LOCATION_ACCURACY_METERS);
+    speed = cleanOptionalRange(speed, 0, 300);
+    heading = cleanOptionalRange(heading, 0, 360);
+    battery = cleanOptionalRange(battery, 0, 100);
 
     if (recordedAt && Number.isNaN(recordedAt.getTime())) {
-      return handleError(res, 400, 'recorded_at must be a valid timestamp');
+      recordedAt = null;
     }
 
     if (recordedAt) {
       const ageMs = Date.now() - recordedAt.getTime();
       if (ageMs > MAX_LOCATION_AGE_MS || ageMs < -MAX_FUTURE_LOCATION_DRIFT_MS) {
-        return handleError(res, 400, 'Location timestamp is stale or too far in the future');
+        recordedAt = null;
       }
     }
 
