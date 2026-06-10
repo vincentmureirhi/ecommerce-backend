@@ -3,10 +3,35 @@ const { Server } = require('socket.io');
 let io;
 const connectedClients = new Map();
 
+function getAllowedSocketOrigins() {
+  const defaults = [
+    'http://localhost:5173',
+    'http://localhost:5174',
+    'http://localhost:3000',
+    'http://127.0.0.1:5173',
+    'http://127.0.0.1:5174',
+    'https://ecommerce-admin-seven-ashy.vercel.app',
+    'https://xpose-distributors.vercel.app',
+  ];
+
+  const envOrigins = [
+    process.env.CORS_ORIGINS,
+    process.env.ADMIN_URL,
+    process.env.STOREFRONT_URL,
+    process.env.FRONTEND_URL,
+  ]
+    .filter(Boolean)
+    .flatMap((value) => String(value).split(','))
+    .map((origin) => origin.trim().replace(/\/$/, ''))
+    .filter(Boolean);
+
+  return [...new Set([...defaults, ...envOrigins])];
+}
+
 function initializeWebSocket(httpServer) {
   io = new Server(httpServer, {
     cors: {
-      origin: ['http://localhost:5173', 'http://localhost:3000', 'http://127.0.0.1:5173'],
+      origin: getAllowedSocketOrigins(),
       methods: ['GET', 'POST'],
       credentials: true,
     },

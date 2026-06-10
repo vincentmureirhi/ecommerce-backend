@@ -78,6 +78,58 @@ async function safeEnqueuePaymentConfirmedSmsInTransaction(client, order, option
   }
 }
 
+function broadcastPaymentLifecycle(payment) {
+  if (!payment?.id) return;
+
+  try {
+    const {
+      broadcastPaymentCompleted,
+      broadcastPaymentFailed,
+      broadcastPaymentPending,
+      broadcastPaymentStatusChange,
+    } = require('../websocket');
+
+    const status = String(payment.status || '').toLowerCase();
+    const amount = payment.received_amount || payment.amount || payment.expected_amount || 0;
+    const payload = {
+      id: payment.id,
+      order_id: payment.order_id,
+      order_number: payment.order_number,
+      amount,
+      status: payment.status,
+      method: payment.method,
+      source: payment.source,
+      mpesa_receipt: payment.mpesa_receipt || payment.reference || null,
+      customer_phone: payment.customer_phone || payment.order_customer_phone || null,
+      result_code: payment.result_code || null,
+      result_desc: payment.result_desc || payment.failure_reason || null,
+      failure_reason: payment.failure_reason || null,
+      reconciliation_status: payment.reconciliation_status || null,
+      completed_at: payment.completed_at || null,
+      updated_at: payment.updated_at || new Date(),
+    };
+
+    if (status === 'completed' || status === 'manually_resolved') {
+      broadcastPaymentCompleted(payload);
+      return;
+    }
+
+    if (status === 'failed' || status === 'cancelled' || status === 'timeout') {
+      broadcastPaymentFailed(payload);
+      return;
+    }
+
+    if (status === 'pending' || status === 'initiated') {
+      broadcastPaymentPending(payload);
+      return;
+    }
+
+    broadcastPaymentStatusChange(payload);
+  } catch (err) {
+    console.error('Payment websocket broadcast failed:', err.message);
+  }
+}
+
 async function getAccessToken(retries = 3) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -361,6 +413,14 @@ const initiateSTKPush = async (req, res) => {
 
       await client.query('COMMIT');
 
+      broadcastPaymentLifecycle({
+        ...payment,
+        status: 'pending',
+        checkout_request_id: stkResponse.data.CheckoutRequestID,
+        merchant_request_id: stkResponse.data.MerchantRequestID,
+        result_desc: stkResponse.data.CustomerMessage || 'STK sent',
+      });
+
       return handleSuccess(res, 200, 'STK Push sent successfully', {
         payment_id: payment.id,
         CheckoutRequestID: stkResponse.data.CheckoutRequestID,
@@ -399,6 +459,14 @@ const initiateSTKPush = async (req, res) => {
       );
 
       await client.query('COMMIT');
+
+      broadcastPaymentLifecycle({
+        ...payment,
+        status: failedStatus,
+        failure_reason: errorMessage,
+        result_code: String(errorCode),
+        result_desc: errorMessage,
+      });
 
       return handleError(res, status || 500, 'Failed to initiate STK push. Sandbox failure is expected until real credentials are live.', {
         payment_id: payment.id,
@@ -745,6 +813,7 @@ const createPayment = async (req, res) => {
     await client.query('COMMIT');
 
     const payment = await fetchPaymentWithOrder(client, insertRes.rows[0].id);
+    broadcastPaymentLifecycle(payment);
     return handleSuccess(res, 201, 'Payment recorded', payment);
   } catch (err) {
     try {
@@ -953,6 +1022,7 @@ const reconcilePayment = async (req, res) => {
     await client.query('COMMIT');
 
     const updatedPayment = await fetchPaymentWithOrder(client, paymentId);
+    broadcastPaymentLifecycle(updatedPayment);
     return handleSuccess(res, 200, 'Payment reconciled successfully', updatedPayment);
   } catch (err) {
     try {
