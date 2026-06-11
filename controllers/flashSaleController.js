@@ -61,6 +61,7 @@ const getActiveFlashSales = async (req, res) => {
               'is_active', COALESCE(p.is_active, TRUE),
               'current_stock', COALESCE(p.current_stock, 0)::INT,
               'stock', COALESCE(p.current_stock, 0)::INT,
+              'stock_status_override', NULLIF(p.stock_status_override, ''),
               'stock_status',
               COALESCE(NULLIF(p.stock_status_override, ''), CASE
                 WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
@@ -167,6 +168,7 @@ const getPublicFlashSaleFeed = async (req, res) => {
               'is_active', COALESCE(p.is_active, TRUE),
               'current_stock', COALESCE(p.current_stock, 0)::INT,
               'stock', COALESCE(p.current_stock, 0)::INT,
+              'stock_status_override', NULLIF(p.stock_status_override, ''),
               'stock_status',
               COALESCE(NULLIF(p.stock_status_override, ''), CASE
                 WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
@@ -782,6 +784,7 @@ const getFlashSaleProducts = async (req, res) => {
         c.name AS category_name,
         COALESCE(p.current_stock, 0)::INT AS current_stock,
         COALESCE(p.current_stock, 0)::INT AS stock,
+        NULLIF(p.stock_status_override, '') AS stock_status_override,
         COALESCE(NULLIF(p.stock_status_override, ''), CASE
           WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
           WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), 10) THEN 'limited_stock'
@@ -898,6 +901,7 @@ const getActiveFlashSaleProducts = async (
         c.name AS category_name,
         COALESCE(p.current_stock, 0)::INT AS current_stock,
         COALESCE(p.current_stock, 0)::INT AS stock,
+        NULLIF(p.stock_status_override, '') AS stock_status_override,
         COALESCE(NULLIF(p.stock_status_override, ''), CASE
           WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
           WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), 10) THEN 'limited_stock'
