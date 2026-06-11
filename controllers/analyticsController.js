@@ -46,6 +46,16 @@ const getDashboardKPIs = async (req, res) => {
 
     const pendingPayments = await pool.query('SELECT COUNT(*) as total FROM payments WHERE status = $1', ['pending']);
     const failedPayments = await pool.query('SELECT COUNT(*) as total FROM payments WHERE status = $1', ['failed']);
+    const paymentStats = await pool.query(
+      `
+      SELECT
+        COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE LOWER(status) IN ('completed', 'manually_resolved')) AS successful
+      FROM payments
+      WHERE created_at >= $1 AND created_at <= $2
+      `,
+      [startDate, endDate]
+    );
     const lowStock = await pool.query('SELECT COUNT(*) as total FROM products WHERE current_stock <= 10 AND current_stock > 0');
     const outOfStock = await pool.query('SELECT COUNT(*) as total FROM products WHERE current_stock = 0');
     const awaitingDispatch = await pool.query('SELECT COUNT(*) as total FROM orders WHERE order_status = $1', ['pending']);
@@ -66,6 +76,8 @@ const getDashboardKPIs = async (req, res) => {
     const currentOrders = parseInt(ordersResult.rows[0].total) || 0;
     const previousRevenue = parseFloat(prevRevenueResult.rows[0].total) || 0;
     const previousOrders = parseInt(prevOrdersResult.rows[0].total) || 0;
+    const totalPayments = parseInt(paymentStats.rows[0].total) || 0;
+    const successfulPayments = parseInt(paymentStats.rows[0].successful) || 0;
 
     // Calculate trends
     const revenueTrend = previousRevenue > 0 ? ((currentRevenue - previousRevenue) / previousRevenue * 100).toFixed(1) : 0;
@@ -86,7 +98,7 @@ const getDashboardKPIs = async (req, res) => {
       awaitingDispatch: parseInt(awaitingDispatch.rows[0].total) || 0,
       newCustomers: parseInt(customersResult.rows[0].total) || 0,
       customer_trend: 0,
-      payment_success_rate: 85, // Default value - will be calculated in payment health
+      payment_success_rate: totalPayments > 0 ? Math.round((successfulPayments / totalPayments) * 100) : 0,
     };
 
     console.log('✅ KPIs retrieved:', data);

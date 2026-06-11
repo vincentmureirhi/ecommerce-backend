@@ -55,6 +55,12 @@ function initializeWebSocket(httpServer) {
       socket.emit('subscription:confirmed', { type: 'alerts' });
     });
 
+    socket.on('subscribe:dashboard', () => {
+      socket.join('dashboard-room');
+      console.log(`📈 Client subscribed to dashboard: ${socket.id}`);
+      socket.emit('subscription:confirmed', { type: 'dashboard' });
+    });
+
     socket.on('disconnect', () => {
       console.log(`❌ Client disconnected: ${socket.id}`);
       connectedClients.delete(socket.id);
@@ -140,6 +146,16 @@ function broadcastPaymentPending(paymentData) {
   }
 }
 
+function broadcastDashboardUpdated(eventData) {
+  if (io) {
+    io.to('dashboard-room').emit('dashboard:updated', {
+      type: eventData?.type || 'dashboard_updated',
+      timestamp: new Date(),
+      data: eventData || {},
+    });
+  }
+}
+
 function getConnectedClientsCount() {
   return connectedClients.size;
 }
@@ -151,5 +167,6 @@ module.exports = {
   broadcastPaymentFailed,
   broadcastPaymentCompleted,
   broadcastPaymentPending,
+  broadcastDashboardUpdated,
   getConnectedClientsCount,
 };

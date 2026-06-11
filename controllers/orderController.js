@@ -7,6 +7,7 @@ const generateOrderNumber = require('../utils/generateOrderNumber');
 
 const { evaluateCartPricingWithMeta } = require('../utils/pricingRuleEvaluator');
 const { enqueuePaymentConfirmedSms } = require('../services/smsService');
+const { broadcastDashboardUpdated } = require('../websocket');
 
 /**
  * Business-rule validation error for order creation.
@@ -65,6 +66,47 @@ function assertProductOrderQuantity(product, quantity) {
       `${product.name || `Product ${product.id}`} must be ordered in steps of ${step} after the minimum of ${minOrderQty}.`
     );
   }
+}
+
+async function reserveStockForOrder(client, items) {
+  const stockChanges = [];
+
+  for (const item of items) {
+    const quantity = Number(item.quantity || 0);
+    const result = await client.query(
+      `
+      UPDATE products
+      SET current_stock = COALESCE(current_stock, 0) - $1,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2
+        AND COALESCE(current_stock, 0) >= $1
+      RETURNING id, name, current_stock
+      `,
+      [quantity, item.product_id]
+    );
+
+    if (result.rowCount === 0) {
+      const product = await client.query(
+        `SELECT id, name, COALESCE(current_stock, 0) AS current_stock FROM products WHERE id = $1`,
+        [item.product_id]
+      );
+      const row = product.rows[0];
+      const available = Number(row?.current_stock || 0);
+      const name = row?.name || `Product ${item.product_id}`;
+      throw new OrderValidationError(
+        `${name} has only ${available} unit${available === 1 ? '' : 's'} available. Reduce the quantity or restock before selling.`
+      );
+    }
+
+    stockChanges.push({
+      product_id: result.rows[0].id,
+      product_name: result.rows[0].name,
+      quantity_sold: quantity,
+      remaining_stock: Number(result.rows[0].current_stock || 0),
+    });
+  }
+
+  return stockChanges;
 }
 
 const VALID_ORDER_TYPES = new Set(['normal', 'route']);
@@ -788,18 +830,30 @@ const guestCheckout = async (req, res) => {
 
   try {
     const {
+      order_type,
+      order_workflow_type,
+      customer_id,
       customer_name,
       customer_phone,
       customer_email,
+      customer_location_id,
       delivery_address,
+      route_area,
+      route_notes,
+      sales_rep_id,
       notes,
       items,
     } = req.body;
 
+    const authenticatedSalesRep = await resolveAuthenticatedSalesRep(req, client);
+    const normalizedOrderType = String(order_type || '').trim().toLowerCase() === 'route' ? 'route' : 'normal';
+    const requestedWorkflowType = normalizeWorkflowType(order_workflow_type);
     const normalizedName = normalizeText(customer_name);
     const normalizedPhone = normalizeText(customer_phone);
     const normalizedEmail = normalizeText(customer_email);
     const normalizedAddress = normalizeText(delivery_address);
+    const normalizedRouteArea = normalizeText(route_area);
+    const normalizedRouteNotes = normalizeText(route_notes);
     const normalizedNotes = normalizeText(notes);
 
     if (!normalizedName) {
@@ -812,40 +866,75 @@ const guestCheckout = async (req, res) => {
       return handleError(res, 400, 'At least one order item is required');
     }
 
-    await client.query('BEGIN');
-
-    // Find or create a buying customer record (customer_type = 'normal')
-    let customerId;
-    const existingCustomer = await client.query(
-      `SELECT id FROM customers
-       WHERE phone = $1 AND customer_type = 'normal'
-       LIMIT 1`,
-      [normalizedPhone]
-    );
-
-    if (existingCustomer.rows.length > 0) {
-      customerId = existingCustomer.rows[0].id;
-      // Update name/email/address if provided
-      await client.query(
-        `UPDATE customers
-         SET name = $1,
-             email = COALESCE($2, email),
-             address = COALESCE($3, address),
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id = $4`,
-        [normalizedName, normalizedEmail, normalizedAddress, customerId]
+    if (order_workflow_type && !requestedWorkflowType) {
+      return handleError(
+        res,
+        400,
+        'order_workflow_type must be one of: normal_self_service, route_self_service, route_sales_rep_capture'
       );
-    } else {
-      const newCustomer = await client.query(
-        `INSERT INTO customers
-         (name, phone, email, address, customer_type, is_active, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, 'normal', TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-         RETURNING id`,
-        [normalizedName, normalizedPhone, normalizedEmail, normalizedAddress]
-      );
-      customerId = newCustomer.rows[0].id;
     }
 
+    let effectiveSalesRepId = sales_rep_id || null;
+
+    if (authenticatedSalesRep) {
+      if (effectiveSalesRepId && Number(effectiveSalesRepId) !== Number(authenticatedSalesRep.id)) {
+        return handleError(res, 403, 'Authenticated sales rep does not match provided sales_rep_id');
+      }
+      effectiveSalesRepId = authenticatedSalesRep.id;
+    }
+
+    if (normalizedOrderType === 'route' && !effectiveSalesRepId) {
+      return handleError(res, 400, 'sales_rep_id is required for route orders');
+    }
+
+    if (requestedWorkflowType === 'route_sales_rep_capture' && !effectiveSalesRepId) {
+      return handleError(res, 400, 'sales_rep_id is required for route_sales_rep_capture workflow');
+    }
+
+    await client.query('BEGIN');
+
+    let customerId;
+    if (normalizedOrderType === 'route') {
+      customerId = await resolveRouteCustomerForOrder(client, {
+        customerId: customer_id || null,
+        customerName: normalizedName,
+        customerPhone: normalizedPhone,
+        salesRepId: effectiveSalesRepId || null,
+        locationId: customer_location_id || null,
+        address: normalizedAddress,
+        routeArea: normalizedRouteArea,
+        routeNotes: normalizedRouteNotes,
+      });
+    } else {
+      const existingCustomer = await client.query(
+        `SELECT id FROM customers
+         WHERE phone = $1 AND customer_type = 'normal'
+         LIMIT 1`,
+        [normalizedPhone]
+      );
+
+      if (existingCustomer.rows.length > 0) {
+        customerId = existingCustomer.rows[0].id;
+        await client.query(
+          `UPDATE customers
+           SET name = $1,
+               email = COALESCE($2, email),
+               address = COALESCE($3, address),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $4`,
+          [normalizedName, normalizedEmail, normalizedAddress, customerId]
+        );
+      } else {
+        const newCustomer = await client.query(
+          `INSERT INTO customers
+           (name, phone, email, address, customer_type, is_active, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, 'normal', TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+           RETURNING id`,
+          [normalizedName, normalizedPhone, normalizedEmail, normalizedAddress]
+        );
+        customerId = newCustomer.rows[0].id;
+      }
+    }
 
     // Validate items and collect product IDs
     const rawItems = [];
@@ -857,8 +946,8 @@ const guestCheckout = async (req, res) => {
       if (!Number.isInteger(productId) || productId <= 0) {
         throw new Error('Invalid product_id in order items');
       }
-      if (!Number.isFinite(quantity) || quantity <= 0) {
-        throw new Error(`Invalid quantity for product ${productId}`);
+      if (!Number.isInteger(quantity) || quantity <= 0) {
+        throw new OrderValidationError(`Invalid quantity for product ${productId}`);
       }
 
       // pricing_mode: normalize falsy values (empty string, undefined) to null
@@ -928,6 +1017,16 @@ const guestCheckout = async (req, res) => {
 
     computedTotalAmount = roundMoney(computedTotalAmount);
     const orderNum = generateOrderNumber();
+    const stockChanges = await reserveStockForOrder(client, preparedItems);
+    const finalWorkflowType =
+      requestedWorkflowType ||
+      (normalizedOrderType === 'route'
+        ? (effectiveSalesRepId ? 'route_sales_rep_capture' : 'route_self_service')
+        : 'normal_self_service');
+    const initialPaymentState =
+      normalizedOrderType === 'route'
+        ? deriveRoutePaymentState(computedTotalAmount, 0, null)
+        : 'unpaid';
 
     const orderResult = await client.query(
       `
@@ -940,6 +1039,7 @@ const guestCheckout = async (req, res) => {
         customer_phone,
         customer_email,
         delivery_address,
+        sales_rep_id,
         order_workflow_type,
         total_amount,
         amount_paid,
@@ -948,18 +1048,22 @@ const guestCheckout = async (req, res) => {
         payment_state,
         is_printed
       )
-      VALUES ($1, 'normal', $2, $3, $4, $5, $6, 'normal_self_service', $7, 0, $8, 'pending', 'unpaid', FALSE)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, $11, 'pending', $12, FALSE)
       RETURNING *
       `,
       [
         orderNum,
+        normalizedOrderType,
         customerId,
         normalizedName,
         normalizedPhone,
         normalizedEmail,
         normalizedAddress,
+        effectiveSalesRepId || null,
+        finalWorkflowType,
         computedTotalAmount,
         normalizedNotes,
+        initialPaymentState,
       ]
     );
 
@@ -1010,6 +1114,13 @@ const guestCheckout = async (req, res) => {
     }
 
     await client.query('COMMIT');
+
+    broadcastDashboardUpdated({
+      type: 'order_created',
+      order_id: orderId,
+      order_number: orderNum,
+      stock_changes: stockChanges,
+    });
 
     const createdOrder = enrichOrder(orderResult.rows[0]);
     createdOrder.items = preparedItems.map((item) => ({
@@ -1171,8 +1282,8 @@ const createOrder = async (req, res) => {
       if (!Number.isInteger(productId) || productId <= 0) {
         throw new Error('Invalid product_id in order items');
       }
-      if (!Number.isFinite(quantity) || quantity <= 0) {
-        throw new Error(`Invalid quantity for product ${productId}`);
+      if (!Number.isInteger(quantity) || quantity <= 0) {
+        throw new OrderValidationError(`Invalid quantity for product ${productId}`);
       }
 
       rawItems.push({
@@ -1287,6 +1398,7 @@ const createOrder = async (req, res) => {
     const finalWorkflowType = requestedWorkflowType || inferredWorkflowType;
 
     const orderNum = generateOrderNumber();
+    const stockChanges = await reserveStockForOrder(client, preparedItems);
 
     const orderResult = await client.query(
       `
@@ -1384,6 +1496,13 @@ const createOrder = async (req, res) => {
     }
 
     await client.query('COMMIT');
+
+    broadcastDashboardUpdated({
+      type: 'order_created',
+      order_id: orderId,
+      order_number: orderNum,
+      stock_changes: stockChanges,
+    });
 
     const createdOrder = enrichOrder(orderResult.rows[0]);
     createdOrder.items = preparedItems.map((item) => ({
@@ -1546,6 +1665,14 @@ const updateOrderStatus = async (req, res) => {
         console.error('Failed to queue payment confirmation SMS:', smsErr.message);
       }
     }
+
+    broadcastDashboardUpdated({
+      type: 'order_updated',
+      order_id: updatedOrder.id,
+      order_number: updatedOrder.order_number,
+      order_status: updatedOrder.order_status,
+      payment_status: updatedOrder.payment_status,
+    });
 
     return handleSuccess(res, 200, 'Order updated successfully', updatedOrder);
   } catch (err) {
