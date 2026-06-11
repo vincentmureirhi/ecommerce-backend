@@ -2,6 +2,23 @@
 
 const pool = require('../config/database');
 
+function normalizePhoneDigits(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  if (digits.length === 10 && digits.startsWith('0')) return `254${digits.slice(1)}`;
+  if (digits.length === 9) return `254${digits}`;
+  return digits;
+}
+
+function getPhoneDigitVariants(value) {
+  const normalized = normalizePhoneDigits(value);
+  const variants = new Set([normalized]);
+  if (normalized.length === 12 && normalized.startsWith('254')) {
+    variants.add(`0${normalized.slice(3)}`);
+    variants.add(normalized.slice(3));
+  }
+  return [...variants].filter(Boolean);
+}
+
 async function fetchCustomerById(id) {
   const result = await pool.query(
     `
@@ -36,6 +53,8 @@ const getAllCustomers = async (req, res) => {
       location_id,
       sales_rep_id,
       region_id,
+      limit,
+      offset,
     } = req.query;
 
     let query = `
@@ -116,6 +135,20 @@ const getAllCustomers = async (req, res) => {
       ORDER BY c.created_at DESC
     `;
 
+    const parsedLimit = Number(limit);
+    const parsedOffset = Number(offset);
+    if (Number.isInteger(parsedLimit) && parsedLimit > 0) {
+      params.push(Math.min(parsedLimit, 100));
+      query += ` LIMIT $${paramIndex}`;
+      paramIndex++;
+
+      if (Number.isInteger(parsedOffset) && parsedOffset > 0) {
+        params.push(parsedOffset);
+        query += ` OFFSET $${paramIndex}`;
+        paramIndex++;
+      }
+    }
+
     const result = await pool.query(query, params);
 
     return res.json({
@@ -172,6 +205,7 @@ const createCustomer = async (req, res) => {
       sales_rep_id,
       route_area,
       route_notes,
+      reject_existing,
       is_active,
     } = req.body;
 
@@ -244,6 +278,7 @@ const updateCustomer = async (req, res) => {
       sales_rep_id,
       route_area,
       route_notes,
+      reject_existing,
       is_active,
     } = req.body;
 
@@ -556,7 +591,8 @@ const upsertRouteCustomer = async (req, res) => {
 
     const normalizedName = String(effectiveName || '').trim();
     const normalizedPhone = String(effectivePhone || '').trim();
-
+    const phoneDigitVariants = getPhoneDigitVariants(normalizedPhone);
+    const rejectExisting = reject_existing === true || String(reject_existing).toLowerCase() === 'true';
 
     if (!normalizedName) {
       return res.status(400).json({
@@ -603,13 +639,27 @@ const upsertRouteCustomer = async (req, res) => {
         SELECT id
         FROM customers
         WHERE customer_type = 'route'
-          AND phone = $1
+          AND (
+            phone = $1
+            OR regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = ANY($2::text[])
+          )
         ORDER BY id ASC
         LIMIT 1
         `,
-        [normalizedPhone]
+        [normalizedPhone, phoneDigitVariants]
       );
       targetCustomerId = existingByPhone.rows[0]?.id || null;
+
+      if (targetCustomerId && rejectExisting) {
+        const existingCustomer = await fetchCustomerById(targetCustomerId);
+        return res.status(409).json({
+          success: false,
+          message: 'Route customer already exists. Select the existing customer instead of creating a duplicate.',
+          data: {
+            customer: existingCustomer,
+          },
+        });
+      }
     }
 
     let operation = 'updated';
