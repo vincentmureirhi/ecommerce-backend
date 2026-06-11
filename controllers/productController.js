@@ -36,6 +36,25 @@ function cleanSellingUnit(value) {
   return text || 'piece';
 }
 
+const STOCK_STATUS_OPTIONS = new Set(['in_stock', 'limited_stock', 'out_of_stock']);
+
+function cleanStockStatusOverride(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return null;
+  if (!STOCK_STATUS_OPTIONS.has(text)) {
+    throw new Error('stock_status_override must be in_stock, limited_stock, or out_of_stock');
+  }
+  return text;
+}
+
+function normalizeStockForStatus(currentStock, stockStatusOverride) {
+  if (stockStatusOverride === 'out_of_stock') return 0;
+  if (stockStatusOverride && currentStock <= 0) {
+    throw new Error('Current stock must be greater than 0 for in-stock or limited-stock products');
+  }
+  return currentStock;
+}
+
 function buildAutoSkuThresholdRuleName(productName) {
   return `Wholesale threshold - ${productName}`;
 }
@@ -61,7 +80,12 @@ const getAllProducts = async (req, res) => {
   try {
     const r = await pool.query(`
       SELECT
-       p.*,
+        p.*,
+        COALESCE(NULLIF(p.stock_status_override, ''), CASE
+          WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
+          WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, 10), 10) THEN 'limited_stock'
+          ELSE 'in_stock'
+        END) AS stock_status,
         c.name AS category_name,
         d.name AS department_name,
         active_flash_sale.id AS flash_sale_id,
@@ -142,6 +166,11 @@ const getProductById = async (req, res) => {
       `
       SELECT
         p.*,
+        COALESCE(NULLIF(p.stock_status_override, ''), CASE
+          WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
+          WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, 10), 10) THEN 'limited_stock'
+          ELSE 'in_stock'
+        END) AS stock_status,
         c.name AS category_name,
         d.name AS department_name,
         active_flash_sale.id AS flash_sale_id,
@@ -226,7 +255,13 @@ const createProduct = async (req, res) => {
 
     const category_id = toInt(req.body.category_id, "category_id");
     const department_id = toInt(req.body.department_id, "department_id", { allowNull: true });
-    const current_stock = toInt(req.body.current_stock ?? 0, "current_stock");
+    const stock_status_override = cleanStockStatusOverride(
+      req.body.stock_status_override ?? req.body.stock_status
+    );
+    const current_stock = normalizeStockForStatus(
+      toInt(req.body.current_stock ?? 0, "current_stock"),
+      stock_status_override
+    );
     const requires_manual_price = Boolean(req.body.requires_manual_price);
 
     const image_url = req.body.image_url ? String(req.body.image_url).trim() : null;
@@ -267,12 +302,12 @@ const createProduct = async (req, res) => {
       `
       INSERT INTO products (
         name, sku, category_id, department_id,
-        current_stock, cost_price,
+        current_stock, stock_status_override, cost_price,
         retail_price, wholesale_price, min_qty_wholesale,
         requires_manual_price, image_url, pricing_rule_id,
         min_order_qty, order_qty_step, selling_unit_label
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
       RETURNING *
       `,
       [
@@ -281,6 +316,7 @@ const createProduct = async (req, res) => {
         category_id,
         department_id,
         current_stock,
+        stock_status_override,
         cost_price ? cost_price.toFixed(2) : null,
         retail_price ? retail_price.toFixed(2) : null,
         wholesale_price ? wholesale_price.toFixed(2) : null,
@@ -321,7 +357,13 @@ const updateProduct = async (req, res) => {
 
     const category_id = toInt(req.body.category_id, "category_id");
     const department_id = toInt(req.body.department_id, "department_id", { allowNull: true });
-    const current_stock = toInt(req.body.current_stock ?? 0, "current_stock");
+    const stock_status_override = cleanStockStatusOverride(
+      req.body.stock_status_override ?? req.body.stock_status
+    );
+    const current_stock = normalizeStockForStatus(
+      toInt(req.body.current_stock ?? 0, "current_stock"),
+      stock_status_override
+    );
     const requires_manual_price = Boolean(req.body.requires_manual_price);
 
     const image_url = req.body.image_url ? String(req.body.image_url).trim() : null;
@@ -398,17 +440,18 @@ const updateProduct = async (req, res) => {
         category_id=$3,
         department_id=$4,
         current_stock=$5,
-        cost_price=$6,
-        retail_price=$7,
-        wholesale_price=$8,
-        min_qty_wholesale=$9,
-        requires_manual_price=$10,
-        image_url=$11,
-        pricing_rule_id=$12,
-        min_order_qty=$13,
-        order_qty_step=$14,
-        selling_unit_label=$15
-      WHERE id=$16
+        stock_status_override=$6,
+        cost_price=$7,
+        retail_price=$8,
+        wholesale_price=$9,
+        min_qty_wholesale=$10,
+        requires_manual_price=$11,
+        image_url=$12,
+        pricing_rule_id=$13,
+        min_order_qty=$14,
+        order_qty_step=$15,
+        selling_unit_label=$16
+      WHERE id=$17
       RETURNING *
       `,
       [
@@ -417,6 +460,7 @@ const updateProduct = async (req, res) => {
         category_id,
         department_id,
         current_stock,
+        stock_status_override,
         cost_price ? cost_price.toFixed(2) : null,
         retail_price ? retail_price.toFixed(2) : null,
         wholesale_price ? wholesale_price.toFixed(2) : null,
@@ -430,7 +474,6 @@ const updateProduct = async (req, res) => {
         id,
       ]
     );
-
 
     await client.query("COMMIT");
 

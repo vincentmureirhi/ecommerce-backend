@@ -43,7 +43,10 @@ const getActiveFlashSales = async (req, res) => {
       SELECT
         fs.*,
 
-        COUNT(DISTINCT fsp.product_id)::INT AS product_count,
+        (
+          COUNT(DISTINCT fsp.product_id)
+          FILTER (WHERE p.id IS NOT NULL AND COALESCE(p.is_active, TRUE) = TRUE)
+        )::INT AS product_count,
 
         COALESCE(
           JSON_AGG(
@@ -52,8 +55,21 @@ const getActiveFlashSales = async (req, res) => {
               'name', p.name,
               'sku', p.sku,
               'retail_price', p.retail_price::FLOAT,
+              'price', p.retail_price::FLOAT,
               'image_url', p.image_url,
               'category_name', c.name,
+              'is_active', COALESCE(p.is_active, TRUE),
+              'current_stock', COALESCE(p.current_stock, 0)::INT,
+              'stock', COALESCE(p.current_stock, 0)::INT,
+              'stock_status',
+              COALESCE(NULLIF(p.stock_status_override, ''), CASE
+                WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
+                WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), 10) THEN 'limited_stock'
+                ELSE 'in_stock'
+              END),
+              'min_order_qty', COALESCE(p.min_order_qty, 1)::INT,
+              'order_qty_step', COALESCE(p.order_qty_step, 1)::INT,
+              'selling_unit_label', COALESCE(NULLIF(p.selling_unit_label, ''), 'piece'),
 
               'discounted_price',
               CASE
@@ -133,7 +149,10 @@ const getPublicFlashSaleFeed = async (req, res) => {
           ELSE 'ended'
         END AS sale_status,
 
-        COUNT(DISTINCT fsp.product_id)::INT AS product_count,
+        (
+          COUNT(DISTINCT fsp.product_id)
+          FILTER (WHERE p.id IS NOT NULL AND COALESCE(p.is_active, TRUE) = TRUE)
+        )::INT AS product_count,
 
         COALESCE(
           JSON_AGG(
@@ -142,8 +161,21 @@ const getPublicFlashSaleFeed = async (req, res) => {
               'name', p.name,
               'sku', p.sku,
               'retail_price', p.retail_price::FLOAT,
+              'price', p.retail_price::FLOAT,
               'image_url', p.image_url,
               'category_name', c.name,
+              'is_active', COALESCE(p.is_active, TRUE),
+              'current_stock', COALESCE(p.current_stock, 0)::INT,
+              'stock', COALESCE(p.current_stock, 0)::INT,
+              'stock_status',
+              COALESCE(NULLIF(p.stock_status_override, ''), CASE
+                WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
+                WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), 10) THEN 'limited_stock'
+                ELSE 'in_stock'
+              END),
+              'min_order_qty', COALESCE(p.min_order_qty, 1)::INT,
+              'order_qty_step', COALESCE(p.order_qty_step, 1)::INT,
+              'selling_unit_label', COALESCE(NULLIF(p.selling_unit_label, ''), 'piece'),
               'is_flash', fs.start_date <= NOW() AND fs.end_date >= NOW(),
               'flash_sale_id', fs.id,
               'flash_sale_name', fs.name,
@@ -170,7 +202,7 @@ const getPublicFlashSaleFeed = async (req, res) => {
               END
             )
             ORDER BY fsp.created_at DESC
-          ) FILTER (WHERE p.id IS NOT NULL),
+          ) FILTER (WHERE p.id IS NOT NULL AND COALESCE(p.is_active, TRUE) = TRUE),
 
           '[]'::json
         ) AS products
@@ -743,9 +775,21 @@ const getFlashSaleProducts = async (req, res) => {
         p.id,
         p.name,
         p.sku,
+        COALESCE(p.is_active, TRUE) AS is_active,
         p.retail_price::FLOAT,
+        p.retail_price::FLOAT AS price,
         p.image_url,
         c.name AS category_name,
+        COALESCE(p.current_stock, 0)::INT AS current_stock,
+        COALESCE(p.current_stock, 0)::INT AS stock,
+        COALESCE(NULLIF(p.stock_status_override, ''), CASE
+          WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
+          WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), 10) THEN 'limited_stock'
+          ELSE 'in_stock'
+        END) AS stock_status,
+        COALESCE(p.min_order_qty, 1)::INT AS min_order_qty,
+        COALESCE(p.order_qty_step, 1)::INT AS order_qty_step,
+        COALESCE(NULLIF(p.selling_unit_label, ''), 'piece') AS selling_unit_label,
         fsp.created_at AS added_at,
 
         CASE
@@ -777,7 +821,9 @@ const getFlashSaleProducts = async (req, res) => {
       LEFT JOIN categories c
         ON c.id = p.category_id
 
-      WHERE fsp.flash_sale_id = $1
+      WHERE
+        fsp.flash_sale_id = $1
+        AND COALESCE(p.is_active, TRUE) = TRUE
 
       ORDER BY fsp.created_at DESC
       `,
@@ -845,9 +891,21 @@ const getActiveFlashSaleProducts = async (
         p.id,
         p.name,
         p.sku,
+        COALESCE(p.is_active, TRUE) AS is_active,
         p.retail_price::FLOAT,
+        p.retail_price::FLOAT AS price,
         p.image_url,
         c.name AS category_name,
+        COALESCE(p.current_stock, 0)::INT AS current_stock,
+        COALESCE(p.current_stock, 0)::INT AS stock,
+        COALESCE(NULLIF(p.stock_status_override, ''), CASE
+          WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
+          WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), 10) THEN 'limited_stock'
+          ELSE 'in_stock'
+        END) AS stock_status,
+        COALESCE(p.min_order_qty, 1)::INT AS min_order_qty,
+        COALESCE(p.order_qty_step, 1)::INT AS order_qty_step,
+        COALESCE(NULLIF(p.selling_unit_label, ''), 'piece') AS selling_unit_label,
         fsp.created_at AS added_at,
 
         CASE
@@ -879,7 +937,9 @@ const getActiveFlashSaleProducts = async (
       LEFT JOIN categories c
         ON c.id = p.category_id
 
-      WHERE fsp.flash_sale_id = $1
+      WHERE
+        fsp.flash_sale_id = $1
+        AND COALESCE(p.is_active, TRUE) = TRUE
 
       ORDER BY fsp.created_at DESC
       `,
