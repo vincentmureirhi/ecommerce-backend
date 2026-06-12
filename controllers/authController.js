@@ -5,6 +5,11 @@ const jwt = require('jsonwebtoken');
 const pool = require('../config/database');
 const { handleError, handleSuccess } = require('../utils/errorHandler');
 
+function getJwtSecret() {
+  const secret = process.env.JWT_SECRET;
+  return typeof secret === 'string' && secret.trim() ? secret : null;
+}
+
 // LOGIN
 const login = async (req, res) => {
   try {
@@ -37,9 +42,14 @@ const login = async (req, res) => {
       return handleError(res, 401, 'Invalid credentials');
     }
 
+    const jwtSecret = getJwtSecret();
+    if (!jwtSecret) {
+      return handleError(res, 500, 'JWT secret is not configured');
+    }
+
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET || 'your-secret-key',
+      jwtSecret,
       { expiresIn: '24h' }
     );
 
@@ -194,7 +204,12 @@ const verifyToken = async (req, res) => {
       return handleError(res, 401, 'No token provided');
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+    const jwtSecret = getJwtSecret();
+    if (!jwtSecret) {
+      return handleError(res, 500, 'JWT secret is not configured');
+    }
+
+    const decoded = jwt.verify(token, jwtSecret);
 
     const userResult = await pool.query(
       'SELECT id, email, role, is_active FROM users WHERE id = $1',

@@ -2,9 +2,18 @@
 
 const rateLimit = require('express-rate-limit');
 
+function envInt(name, defaultValue, options = {}) {
+  const parsed = Number(process.env[name]);
+  const min = options.min ?? 1;
+  const max = options.max ?? Number.MAX_SAFE_INTEGER;
+
+  if (!Number.isInteger(parsed)) return defaultValue;
+  return Math.min(Math.max(parsed, min), max);
+}
+
 const apiRateLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 600,
+  windowMs: envInt('API_RATE_LIMIT_WINDOW_MS', 60 * 1000, { min: 1000 }),
+  max: envInt('API_RATE_LIMIT_MAX', 600, { min: 1 }),
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => req.path === '/health',
@@ -15,8 +24,8 @@ const apiRateLimiter = rateLimit({
 });
 
 const routeCustomerUpsertRateLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 30,
+  windowMs: envInt('ROUTE_CUSTOMER_UPSERT_RATE_LIMIT_WINDOW_MS', 60 * 1000, { min: 1000 }),
+  max: envInt('ROUTE_CUSTOMER_UPSERT_RATE_LIMIT_MAX', 30, { min: 1 }),
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -26,8 +35,8 @@ const routeCustomerUpsertRateLimiter = rateLimit({
 });
 
 const salesRepLoginRateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
+  windowMs: envInt('SALES_REP_LOGIN_RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000, { min: 1000 }),
+  max: envInt('SALES_REP_LOGIN_RATE_LIMIT_MAX', 20, { min: 1 }),
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -37,8 +46,8 @@ const salesRepLoginRateLimiter = rateLimit({
 });
 
 const salesRepRateLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 60,
+  windowMs: envInt('SALES_REP_RATE_LIMIT_WINDOW_MS', 60 * 1000, { min: 1000 }),
+  max: envInt('SALES_REP_RATE_LIMIT_MAX', 60, { min: 1 }),
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -48,8 +57,8 @@ const salesRepRateLimiter = rateLimit({
 });
 
 const orderTrackingRateLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 12,
+  windowMs: envInt('ORDER_TRACKING_RATE_LIMIT_WINDOW_MS', 60 * 1000, { min: 1000 }),
+  max: envInt('ORDER_TRACKING_RATE_LIMIT_MAX', 12, { min: 1 }),
   standardHeaders: true,
   legacyHeaders: false,
   message: {

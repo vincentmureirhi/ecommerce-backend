@@ -50,6 +50,36 @@ const pricingGroupsRoutes = require('./routes/pricingGroups');
 const app = express();
 const httpServer = http.createServer(app);
 
+function envFlag(name, defaultValue = false) {
+  const value = process.env[name];
+  if (value === undefined || value === null || value === '') return defaultValue;
+
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return defaultValue;
+}
+
+function envInt(name, defaultValue, options = {}) {
+  const parsed = Number(process.env[name]);
+  const min = options.min ?? 0;
+  const max = options.max ?? Number.MAX_SAFE_INTEGER;
+
+  if (!Number.isInteger(parsed)) return defaultValue;
+  return Math.min(Math.max(parsed, min), max);
+}
+
+app.disable('x-powered-by');
+app.set('trust proxy', envInt('TRUST_PROXY_HOPS', 1, { min: 0, max: 10 }));
+
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'geolocation=(self), camera=(), microphone=()');
+  next();
+});
+
 // ===== WEBSOCKET =====
 initializeWebSocket(httpServer);
 global.io = require('./websocket');
@@ -150,13 +180,12 @@ app.get('/api/health', async (req, res) => {
       success: true,
       db: true,
       timestamp: result.rows[0].now,
-      env: process.env.NODE_ENV,
     });
 
   } catch (err) {
     res.status(500).json({
       success: false,
-      error: err.message,
+      error: 'Health check failed',
     });
   }
 });
@@ -222,32 +251,50 @@ app.use((err, req, res, next) => {
 // BACKGROUND JOBS
 // =====================================================
 
-setInterval(async () => {
-  try {
-    await autoFailStalePendingPayments();
-  } catch (err) {
-    console.error('Payment job error:', err.message);
-  }
-}, 60000);
+function scheduleRepeatingJob(name, job, intervalMs) {
+  const safeIntervalMs = Math.max(Number(intervalMs) || 60000, 5000);
 
-setInterval(async () => {
-  try {
-    await autoProgressOrders();
-  } catch (err) {
-    console.error('Order job error:', err.message);
-  }
-}, 300000);
-
-setInterval(async () => {
-  try {
-    const result = await processQueuedSmsNotifications();
-    if (result.processed || result.sent || result.failed) {
-      console.log('SMS job result:', result);
+  const timer = setInterval(async () => {
+    try {
+      await job();
+    } catch (err) {
+      console.error(`${name} job error:`, err.message);
     }
-  } catch (err) {
-    console.error('SMS job error:', err.message);
+  }, safeIntervalMs);
+
+  if (typeof timer.unref === 'function') {
+    timer.unref();
   }
-}, Number(process.env.SMS_JOB_INTERVAL_MS || 60000));
+
+  return timer;
+}
+
+if (envFlag('RUN_BACKGROUND_JOBS', true)) {
+  scheduleRepeatingJob(
+    'Payment',
+    async () => autoFailStalePendingPayments(),
+    envInt('PAYMENT_AUTO_FAIL_JOB_INTERVAL_MS', 60000, { min: 5000 })
+  );
+
+  scheduleRepeatingJob(
+    'Order progression',
+    async () => autoProgressOrders(),
+    envInt('ORDER_PROGRESSION_JOB_INTERVAL_MS', 300000, { min: 60000 })
+  );
+
+  scheduleRepeatingJob(
+    'SMS',
+    async () => {
+      const result = await processQueuedSmsNotifications();
+      if (result.processed || result.sent || result.failed) {
+        console.log('SMS job result:', result);
+      }
+    },
+    envInt('SMS_JOB_INTERVAL_MS', 60000, { min: 5000 })
+  );
+} else {
+  console.log('Background jobs are disabled for this instance');
+}
 
 // =====================================================
 // START SERVER (CRITICAL FIX)

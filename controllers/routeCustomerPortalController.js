@@ -8,7 +8,7 @@ const {
   listRouteCustomerApplicationEvents,
 } = require('../utils/routeCustomerApplicationEvents');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+const JWT_SECRET = process.env.JWT_SECRET;
 const ROUTE_CUSTOMER_TOKEN_EXPIRY = '24h';
 
 const VALID_REVIEW_STAGES = new Set([
@@ -66,6 +66,12 @@ function generateTemporaryPassword(length = 10) {
 }
 
 function signRouteCustomerToken(account) {
+  if (!JWT_SECRET) {
+    const err = new Error('JWT secret is not configured');
+    err.status = 500;
+    throw err;
+  }
+
   return jwt.sign(
     {
       token_type: 'route_customer',

@@ -2,11 +2,24 @@
 
 const jwt = require('jsonwebtoken');
 
+function getJwtSecret() {
+  const secret = process.env.JWT_SECRET;
+  return typeof secret === 'string' && secret.trim() ? secret : null;
+}
+
 /**
  * Verify JWT token and attach user to request
  */
 const verifyToken = (req, res, next) => {
   try {
+    const jwtSecret = getJwtSecret();
+    if (!jwtSecret) {
+      return res.status(500).json({
+        success: false,
+        error: 'JWT secret is not configured',
+      });
+    }
+
     const authHeader = req.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -17,7 +30,7 @@ const verifyToken = (req, res, next) => {
     }
 
     const token = authHeader.substring(7); // Remove "Bearer " prefix
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+    const decoded = jwt.verify(token, jwtSecret);
 
     req.user = decoded;
     next();

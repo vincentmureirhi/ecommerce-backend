@@ -1,4 +1,5 @@
 const express = require('express');
+const { verifyToken, requireAdmin } = require('../middleware/authMiddleware');
 const {
   getAllRegions,
   getRegionById,
@@ -11,10 +12,10 @@ const {
 const router = express.Router();
 
 router.get('/', getAllRegions);
-router.get('/:id/dashboard', getRegionDashboard);
+router.get('/:id/dashboard', verifyToken, requireAdmin, getRegionDashboard);
 router.get('/:id', getRegionById);
-router.post('/', createRegion);
-router.put('/:id', updateRegion);
-router.delete('/:id', deleteRegion);
+router.post('/', verifyToken, requireAdmin, createRegion);
+router.put('/:id', verifyToken, requireAdmin, updateRegion);
+router.delete('/:id', verifyToken, requireAdmin, deleteRegion);
 
 module.exports = router;

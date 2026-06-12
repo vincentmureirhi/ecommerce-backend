@@ -37,7 +37,8 @@ const { resolveProductUnitPrice, applyCategoryComboDiscounts } = require('./pric
   assert.strictEqual(price, null);
 }
 
-// Category combo CAP reduces price only
+// Category combo CAP reduces price only.
+// combo_discount_price is the total bundle price, distributed across eligible units.
 {
   const discounted = applyCategoryComboDiscounts(
     [
@@ -51,8 +52,8 @@ const { resolveProductUnitPrice, applyCategoryComboDiscounts } = require('./pric
     ]
   );
 
-  assert.strictEqual(discounted[0].unit_price.toFixed(2), '80.00');
-  assert.strictEqual(discounted[1].unit_price.toFixed(2), '80.00');
+  assert.strictEqual(discounted[0].unit_price.toFixed(2), '13.33');
+  assert.strictEqual(discounted[1].unit_price.toFixed(2), '13.33');
   assert.strictEqual(discounted[2].unit_price.toFixed(2), '100.00');
 }
 

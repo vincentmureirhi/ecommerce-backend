@@ -1,4 +1,5 @@
 const express = require('express');
+const { verifyToken, requireAdmin } = require('../middleware/authMiddleware');
 const {
   getAllLocations,
   getLocationById,
@@ -11,8 +12,8 @@ const router = express.Router();
 
 router.get('/', getAllLocations);
 router.get('/:id', getLocationById);
-router.post('/', createLocation);
-router.put('/:id', updateLocation);
-router.delete('/:id', deleteLocation);
+router.post('/', verifyToken, requireAdmin, createLocation);
+router.put('/:id', verifyToken, requireAdmin, updateLocation);
+router.delete('/:id', verifyToken, requireAdmin, deleteLocation);
 
 module.exports = router;

@@ -13,13 +13,20 @@ const {
 
 const router = express.Router();
 
+function getJwtSecret() {
+  const secret = process.env.JWT_SECRET;
+  return typeof secret === 'string' && secret.trim() ? secret : null;
+}
+
 // Optional auth: attach req.user if a valid token is present, but never block the request
 const optionalAuth = (req, res, next) => {
   try {
+    const jwtSecret = getJwtSecret();
     const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
+
+    if (jwtSecret && authHeader && authHeader.startsWith('Bearer ')) {
       const token = authHeader.substring(7);
-      req.user = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+      req.user = jwt.verify(token, jwtSecret);
     } else {
       req.user = null;
     }

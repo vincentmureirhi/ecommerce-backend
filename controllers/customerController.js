@@ -577,6 +577,7 @@ const upsertRouteCustomer = async (req, res) => {
       sales_rep_id,
       route_area,
       route_notes,
+      reject_existing,
       is_active,
     } = req.body;
 

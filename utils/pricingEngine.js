@@ -38,6 +38,10 @@ function appendSource(existing, suffix) {
   return `${existing}+${suffix}`;
 }
 
+function isTierPriceSource(value) {
+  return String(value || '').toLowerCase().includes('tier');
+}
+
 /**
  * Rule priority per line:
  * 1) requires_manual_price => null
@@ -154,6 +158,9 @@ function applyCategoryComboDiscounts(lines, categories, productTiers = {}) {
     // Skip manual-price lines
     if (l.price_source === 'manual_price') continue;
 
+    // Skip lines already priced by a product/rule tier.
+    if (isTierPriceSource(l.price_source)) continue;
+
     // Skip if product has tiers
     const productId = toInt(l.product_id, 'line.product_id');
     if (productId != null && safeProductTiers[productId]) continue;
@@ -182,6 +189,9 @@ function applyCategoryComboDiscounts(lines, categories, productTiers = {}) {
 
     // Never touch manual-price lines
     if (l.price_source === 'manual_price') return l;
+
+    // Never override product/rule tier pricing with category combos.
+    if (isTierPriceSource(l.price_source)) return l;
 
     // If unit_price is null, it's manual/invalid => untouched
     if (l.unit_price == null) return l;

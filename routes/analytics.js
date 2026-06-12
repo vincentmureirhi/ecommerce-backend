@@ -2,7 +2,7 @@
 
 const express = require('express');
 const router = express.Router();
-const { verifyToken } = require('../middleware/authMiddleware');
+const { verifyToken, requireAdmin } = require('../middleware/authMiddleware');
 const {
   getDashboardKPIs,
   getSalesTrend,
@@ -19,7 +19,7 @@ const {
   getMorningSummary,
 } = require('../controllers/analyticsController');
 
-router.use(verifyToken);
+router.use(verifyToken, requireAdmin);
 
 // Existing routes
 router.get('/kpis', getDashboardKPIs);

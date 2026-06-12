@@ -36,6 +36,11 @@ function cleanSellingUnit(value) {
   return text || 'piece';
 }
 
+function cleanOptionalText(value) {
+  const text = String(value || '').trim();
+  return text || null;
+}
+
 const STOCK_STATUS_OPTIONS = new Set(['in_stock', 'limited_stock', 'out_of_stock']);
 
 function cleanStockStatusOverride(value) {
@@ -253,6 +258,8 @@ const createProduct = async (req, res) => {
     if (!name) return handleError(res, 400, "name is required");
     if (!sku) return handleError(res, 400, "sku is required");
 
+    const description = cleanOptionalText(req.body.description);
+    const barcode = cleanOptionalText(req.body.barcode);
     const category_id = toInt(req.body.category_id, "category_id");
     const department_id = toInt(req.body.department_id, "department_id", { allowNull: true });
     const stock_status_override = cleanStockStatusOverride(
@@ -268,6 +275,9 @@ const createProduct = async (req, res) => {
     const min_order_qty = toPositiveInt(req.body.min_order_qty, 'min_order_qty', 1);
     const order_qty_step = toPositiveInt(req.body.order_qty_step, 'order_qty_step', 1);
     const selling_unit_label = cleanSellingUnit(req.body.selling_unit_label);
+    const reorder_level = toInt(req.body.reorder_level ?? 10, 'reorder_level');
+    const is_combo_eligible = req.body.is_combo_eligible === true;
+    const is_active = req.body.is_active !== false;
 
     // Profit calculation needs cost_price even if manual pricing product
     const cost_price = toMoney(req.body.cost_price, "cost_price", { allowNull: true });
@@ -301,18 +311,21 @@ const createProduct = async (req, res) => {
     const r = await client.query(
       `
       INSERT INTO products (
-        name, sku, category_id, department_id,
+        name, description, sku, barcode, category_id, department_id,
         current_stock, stock_status_override, cost_price,
         retail_price, wholesale_price, min_qty_wholesale,
         requires_manual_price, image_url, pricing_rule_id,
-        min_order_qty, order_qty_step, selling_unit_label
+        min_order_qty, order_qty_step, selling_unit_label,
+        reorder_level, is_combo_eligible, is_active
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
       RETURNING *
       `,
       [
         name,
+        description,
         sku,
+        barcode,
         category_id,
         department_id,
         current_stock,
@@ -327,6 +340,9 @@ const createProduct = async (req, res) => {
         min_order_qty,
         order_qty_step,
         selling_unit_label,
+        reorder_level,
+        is_combo_eligible,
+        is_active,
       ]
     );
 
@@ -355,6 +371,8 @@ const updateProduct = async (req, res) => {
     if (!name) return handleError(res, 400, "name is required");
     if (!sku) return handleError(res, 400, "sku is required");
 
+    const description = cleanOptionalText(req.body.description);
+    const barcode = cleanOptionalText(req.body.barcode);
     const category_id = toInt(req.body.category_id, "category_id");
     const department_id = toInt(req.body.department_id, "department_id", { allowNull: true });
     const stock_status_override = cleanStockStatusOverride(
@@ -370,6 +388,9 @@ const updateProduct = async (req, res) => {
     const min_order_qty = toPositiveInt(req.body.min_order_qty, 'min_order_qty', 1);
     const order_qty_step = toPositiveInt(req.body.order_qty_step, 'order_qty_step', 1);
     const selling_unit_label = cleanSellingUnit(req.body.selling_unit_label);
+    const reorder_level = toInt(req.body.reorder_level ?? 10, 'reorder_level');
+    const is_combo_eligible = req.body.is_combo_eligible === true;
+    const is_active = req.body.is_active !== false;
     const cost_price = toMoney(req.body.cost_price, "cost_price", { allowNull: true });
 
     const hasExplicitPricingRuleId = Object.prototype.hasOwnProperty.call(req.body, "pricing_rule_id");
@@ -436,27 +457,35 @@ const updateProduct = async (req, res) => {
       UPDATE products
       SET
         name=$1,
-        sku=$2,
-        category_id=$3,
-        department_id=$4,
-        current_stock=$5,
-        stock_status_override=$6,
-        cost_price=$7,
-        retail_price=$8,
-        wholesale_price=$9,
-        min_qty_wholesale=$10,
-        requires_manual_price=$11,
-        image_url=$12,
-        pricing_rule_id=$13,
-        min_order_qty=$14,
-        order_qty_step=$15,
-        selling_unit_label=$16
-      WHERE id=$17
+        description=$2,
+        sku=$3,
+        barcode=$4,
+        category_id=$5,
+        department_id=$6,
+        current_stock=$7,
+        stock_status_override=$8,
+        cost_price=$9,
+        retail_price=$10,
+        wholesale_price=$11,
+        min_qty_wholesale=$12,
+        requires_manual_price=$13,
+        image_url=$14,
+        pricing_rule_id=$15,
+        min_order_qty=$16,
+        order_qty_step=$17,
+        selling_unit_label=$18,
+        reorder_level=$19,
+        is_combo_eligible=$20,
+        is_active=$21,
+        updated_at=CURRENT_TIMESTAMP
+      WHERE id=$22
       RETURNING *
       `,
       [
         name,
+        description,
         sku,
+        barcode,
         category_id,
         department_id,
         current_stock,
@@ -471,6 +500,9 @@ const updateProduct = async (req, res) => {
         min_order_qty,
         order_qty_step,
         selling_unit_label,
+        reorder_level,
+        is_combo_eligible,
+        is_active,
         id,
       ]
     );
@@ -504,7 +536,19 @@ const deleteProduct = async (req, res) => {
 // If you already have these routes, keep them simple:
 const getOutOfStockProducts = async (req, res) => {
   try {
-    const r = await pool.query(`SELECT * FROM products WHERE current_stock <= 0 ORDER BY id DESC`);
+    const r = await pool.query(`
+      SELECT
+        *,
+        COALESCE(NULLIF(stock_status_override, ''), 'out_of_stock') AS stock_status
+      FROM products
+      WHERE
+        COALESCE(is_active, TRUE) = TRUE
+        AND (
+          COALESCE(current_stock, 0) <= 0
+          OR stock_status_override = 'out_of_stock'
+        )
+      ORDER BY id DESC
+    `);
     return handleSuccess(res, 200, "Out of stock products", r.rows);
   } catch (err) {
     return handleError(res, 500, "Failed to retrieve out of stock products", err);
@@ -513,7 +557,20 @@ const getOutOfStockProducts = async (req, res) => {
 
 const getLowStockProducts = async (req, res) => {
   try {
-    const r = await pool.query(`SELECT * FROM products WHERE current_stock > 0 AND current_stock <= 10 ORDER BY id DESC`);
+    const r = await pool.query(`
+      SELECT
+        *,
+        COALESCE(NULLIF(stock_status_override, ''), 'limited_stock') AS stock_status
+      FROM products
+      WHERE
+        COALESCE(is_active, TRUE) = TRUE
+        AND COALESCE(current_stock, 0) > 0
+        AND (
+          stock_status_override = 'limited_stock'
+          OR COALESCE(current_stock, 0) <= GREATEST(COALESCE(min_order_qty, 1), COALESCE(reorder_level, 10), 10)
+        )
+      ORDER BY current_stock ASC, id DESC
+    `);
     return handleSuccess(res, 200, "Low stock products", r.rows);
   } catch (err) {
     return handleError(res, 500, "Failed to retrieve low stock products", err);
