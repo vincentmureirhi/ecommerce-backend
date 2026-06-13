@@ -2,6 +2,7 @@
 
 const axios = require('axios');
 const pool = require('../config/database');
+const { buildOrderTrackingUrl } = require('../utils/orderTrackingToken');
 
 const LIVE_SMS_ENDPOINT = 'https://api.africastalking.com/version1/messaging';
 const SANDBOX_SMS_ENDPOINT = 'https://api.sandbox.africastalking.com/version1/messaging';
@@ -39,9 +40,13 @@ function getStorefrontBaseUrl() {
   ).replace(/\/$/, '');
 }
 
-function buildTrackOrderUrl(orderNumber) {
+function buildTrackOrderUrl(order) {
+  if (order && typeof order === 'object') {
+    return order.tracking_url || buildOrderTrackingUrl(order) || `${getStorefrontBaseUrl()}/track-order`;
+  }
+
   const base = getStorefrontBaseUrl();
-  return `${base}/track-order?id=${encodeURIComponent(orderNumber || '')}`;
+  return `${base}/track-order?id=${encodeURIComponent(order || '')}`;
 }
 
 function compactSmsText(text) {
@@ -53,10 +58,10 @@ function compactSmsText(text) {
 
 function buildPaymentConfirmedMessage(order) {
   const orderNumber = order.order_number || `#${order.id}`;
-  const trackUrl = buildTrackOrderUrl(orderNumber);
+  const trackUrl = buildTrackOrderUrl(order);
 
   return compactSmsText(
-    `XPOSE: Payment confirmed for order ${orderNumber}. Track: ${trackUrl}. Use the phone used when ordering. Thank you.`
+    `XPOSE: Payment confirmed for order ${orderNumber}. Secure tracking: ${trackUrl}. Keep this link private. Thank you.`
   );
 }
 
@@ -154,6 +159,7 @@ async function countSmsSentToday() {
     WHERE status = 'sent'
       AND sent_at >= CURRENT_DATE
       AND provider = 'africastalking'
+      AND COALESCE(provider_message_id, '') NOT LIKE 'dry_run_%'
     `
   );
 
@@ -219,6 +225,26 @@ function isProviderSuccess(providerResponse) {
   const status = String(recipient.status || '').toLowerCase();
   const statusCode = Number(recipient.statusCode);
   return status === 'success' || statusCode === 101 || statusCode === 102;
+}
+
+function getPermanentProviderFailure(providerResponse) {
+  const recipient = getFirstRecipient(providerResponse);
+  if (!recipient) return null;
+
+  const status = String(recipient.status || '').trim();
+  const normalized = status.toLowerCase();
+  const permanentStatuses = new Set([
+    'userinblacklist',
+    'invalidphonenumber',
+    'unsupportednumbertype',
+    'usernotallowed',
+  ]);
+
+  if (permanentStatuses.has(normalized)) {
+    return status || 'Permanent provider rejection';
+  }
+
+  return null;
 }
 
 async function claimQueuedSms(limit) {
@@ -298,6 +324,25 @@ async function markSmsSent(row, providerResponse) {
   );
 }
 
+async function markSmsCancelled(row, errorMessage, providerResponse = null) {
+  await pool.query(
+    `
+    UPDATE sms_outbox
+    SET
+      status = 'cancelled',
+      provider_response = COALESCE($1, provider_response),
+      last_error = $2,
+      updated_at = NOW()
+    WHERE id = $3
+    `,
+    [
+      providerResponse ? JSON.stringify(providerResponse) : null,
+      errorMessage,
+      row.id,
+    ]
+  );
+}
+
 async function markSmsFailedOrRetry(row, errorMessage, providerResponse = null) {
   const shouldRetry = row.attempts < row.max_attempts;
   const delayMinutes = Math.min(60, Math.max(2, row.attempts * 5));
@@ -372,6 +417,13 @@ async function processSmsOutboxBatch(options = {}) {
       }
 
       if (!isProviderSuccess(providerResponse)) {
+        const permanentFailure = getPermanentProviderFailure(providerResponse);
+        if (permanentFailure) {
+          await markSmsCancelled(row, `Permanent SMS rejection: ${permanentFailure}`, providerResponse);
+          failed += 1;
+          continue;
+        }
+
         await markSmsFailedOrRetry(row, 'Africa\'s Talking did not accept the SMS', providerResponse);
         failed += 1;
         continue;

@@ -6,6 +6,10 @@ const { handleError, handleSuccess } = require('../utils/errorHandler');
 const generateOrderNumber = require('../utils/generateOrderNumber');
 
 const { evaluateCartPricingWithMeta } = require('../utils/pricingRuleEvaluator');
+const {
+  attachOrderTrackingLink,
+  verifyOrderTrackingToken,
+} = require('../utils/orderTrackingToken');
 const { enqueuePaymentConfirmedSms } = require('../services/smsService');
 const { broadcastDashboardUpdated } = require('../websocket');
 
@@ -1129,7 +1133,7 @@ const guestCheckout = async (req, res) => {
       total_price: item.line_total,
     }));
 
-    return handleSuccess(res, 201, 'Order placed successfully', createdOrder);
+    return handleSuccess(res, 201, 'Order placed successfully', attachOrderTrackingLink(createdOrder));
   } catch (err) {
     await client.query('ROLLBACK');
     if (err.isOrderValidationError) {
@@ -1511,7 +1515,7 @@ const createOrder = async (req, res) => {
       total_price: item.line_total,
     }));
 
-    return handleSuccess(res, 201, 'Order created successfully', createdOrder);
+    return handleSuccess(res, 201, 'Order created successfully', attachOrderTrackingLink(createdOrder));
   } catch (err) {
     await client.query('ROLLBACK');
     if (err.isOrderValidationError) {
@@ -2338,13 +2342,34 @@ function deriveTrackingStage(order) {
 
 const trackPublicOrder = async (req, res) => {
   try {
+    const trackingToken = String(req.query.t || req.query.token || '').trim();
     const orderNumber = String(req.query.order_number || '').trim();
     const phoneDigits = String(req.query.customer_phone || '').replace(/\D/g, '');
     const phoneVariants = getPhoneLookupVariants(req.query.customer_phone);
 
-    if (!orderNumber || !phoneDigits) {
-      return handleError(res, 400, 'order_number and customer_phone are required');
+    let trackingClaims = null;
+    let accessLevel = 'manual_verification';
+
+    if (trackingToken) {
+      trackingClaims = verifyOrderTrackingToken(trackingToken);
+
+      if (!trackingClaims) {
+        return handleError(res, 401, 'Tracking link is invalid or expired');
+      }
+
+      accessLevel = 'secure_link';
+    } else if (!orderNumber || !phoneDigits) {
+      return handleError(res, 400, 'secure tracking token or order_number and customer_phone are required');
     }
+
+    const whereClause = trackingClaims
+      ? 'WHERE o.id = $1 AND o.order_number = $2'
+      : `WHERE o.order_number = $1
+        AND regexp_replace(COALESCE(o.customer_phone, ''), '\\D', '', 'g') = ANY($2::text[])`;
+
+    const queryParams = trackingClaims
+      ? [trackingClaims.order_id, trackingClaims.order_number]
+      : [orderNumber, phoneVariants];
 
     const orderResult = await pool.query(
       `
@@ -2355,13 +2380,12 @@ const trackPublicOrder = async (req, res) => {
         COALESCE(SUM(oi.quantity), 0) AS total_items
       FROM orders o
       LEFT JOIN order_items oi ON oi.order_id = o.id
-      WHERE o.order_number = $1
-        AND regexp_replace(COALESCE(o.customer_phone, ''), '\D', '', 'g') = ANY($2::text[])
+      ${whereClause}
       GROUP BY o.id
       ORDER BY o.id DESC
       LIMIT 1
       `,
-      [orderNumber, phoneVariants]
+      queryParams
     );
 
     if (orderResult.rows.length === 0) {
@@ -2423,9 +2447,16 @@ const trackPublicOrder = async (req, res) => {
       status_changed_at: order.status_changed_at,
       last_payment_date: order.last_payment_date,
       items,
+      access_level: accessLevel,
+      tracking_token_verified: accessLevel === 'secure_link',
     };
 
-    return handleSuccess(res, 200, 'Order tracking retrieved successfully', publicOrder);
+    return handleSuccess(
+      res,
+      200,
+      'Order tracking retrieved successfully',
+      attachOrderTrackingLink(publicOrder)
+    );
   } catch (err) {
     console.error('trackPublicOrder error:', err.message);
     return handleError(res, 500, 'Failed to track order', err);
