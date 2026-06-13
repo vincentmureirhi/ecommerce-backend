@@ -2397,8 +2397,12 @@ const trackPublicOrder = async (req, res) => {
     const phoneLast3 = phoneLast3Digits.length >= 3 ? phoneLast3Digits.slice(-3) : '';
     const verificationType = String(req.query.verification_type || '').trim().toLowerCase();
     const verificationAnswer = String(req.query.verification_answer || '').trim();
+    const recoveryTotalAnswer = String(req.query.recovery_total || req.query.order_total || '').trim();
+    const recoveryLocationAnswer = String(req.query.recovery_location || req.query.delivery_area || req.query.location || '').trim();
     const recoveryVerification =
       Boolean(orderNumber && phoneLast3 && verificationType && verificationAnswer);
+    const noOrderNumberRecovery =
+      Boolean(!orderNumber && phoneDigits && recoveryTotalAnswer && recoveryLocationAnswer);
 
     let trackingClaims = null;
     let accessLevel = 'manual_verification';
@@ -2411,8 +2415,10 @@ const trackPublicOrder = async (req, res) => {
       }
 
       accessLevel = 'secure_link';
-    } else if (!orderNumber || (!phoneDigits && !recoveryVerification)) {
-      return handleError(res, 400, 'secure tracking token, full phone verification, or recovery verification is required');
+    } else if (!orderNumber && !noOrderNumberRecovery) {
+      return handleError(res, 400, 'secure tracking token, order number verification, or phone recovery verification is required');
+    } else if (orderNumber && !phoneDigits && !recoveryVerification) {
+      return handleError(res, 400, 'full phone verification or recovery verification is required');
     }
 
     let whereClause;
@@ -2421,6 +2427,10 @@ const trackPublicOrder = async (req, res) => {
     if (trackingClaims) {
       whereClause = 'WHERE o.id = $1 AND o.order_number = $2';
       queryParams = [trackingClaims.order_id, trackingClaims.order_number];
+    } else if (noOrderNumberRecovery) {
+      whereClause = `WHERE regexp_replace(COALESCE(o.customer_phone, ''), '\\D', '', 'g') = ANY($1::text[])`;
+      queryParams = [phoneVariants];
+      accessLevel = 'phone_recovery';
     } else if (recoveryVerification && !phoneDigits) {
       whereClause = `WHERE o.order_number = $1
         AND RIGHT(regexp_replace(COALESCE(o.customer_phone, ''), '\\D', '', 'g'), 3) = $2`;
@@ -2444,7 +2454,7 @@ const trackPublicOrder = async (req, res) => {
       ${whereClause}
       GROUP BY o.id
       ORDER BY o.id DESC
-      LIMIT 1
+      ${noOrderNumberRecovery ? 'LIMIT 8' : 'LIMIT 1'}
       `,
       queryParams
     );
@@ -2453,7 +2463,22 @@ const trackPublicOrder = async (req, res) => {
       return handleError(res, 404, 'Order not found for the provided details');
     }
 
-    const order = enrichOrder(orderResult.rows[0]);
+    let order = enrichOrder(orderResult.rows[0]);
+
+    if (accessLevel === 'phone_recovery') {
+      const matchedOrder = orderResult.rows
+        .map((row) => enrichOrder(row))
+        .find((candidate) => (
+          verifyTrackingRecoveryAnswer(candidate, 'total', recoveryTotalAnswer) &&
+          verifyTrackingRecoveryAnswer(candidate, 'location', recoveryLocationAnswer)
+        ));
+
+      if (!matchedOrder) {
+        return handleError(res, 404, 'Order not found for the provided verification details');
+      }
+
+      order = matchedOrder;
+    }
 
     if (accessLevel === 'recovery_verification' && !verifyTrackingRecoveryAnswer(order, verificationType, verificationAnswer)) {
       return handleError(res, 404, 'Order not found for the provided verification details');
