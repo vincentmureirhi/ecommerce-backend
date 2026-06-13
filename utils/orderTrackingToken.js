@@ -78,7 +78,10 @@ function verifyOrderTrackingToken(token) {
 
 function buildOrderTrackingUrl(order) {
   const token = buildOrderTrackingToken(order);
-  if (!token) return null;
+  if (!token) {
+    if (!order?.order_number) return null;
+    return `${getStorefrontBaseUrl()}/track-order?id=${encodeURIComponent(String(order.order_number))}`;
+  }
 
   return `${getStorefrontBaseUrl()}/track-order?t=${encodeURIComponent(token)}`;
 }
@@ -87,12 +90,23 @@ function attachOrderTrackingLink(order) {
   if (!order || typeof order !== 'object') return order;
 
   const trackingToken = buildOrderTrackingToken(order);
-  if (!trackingToken) return order;
+  if (!trackingToken) {
+    if (!order.order_number) return order;
+
+    return {
+      ...order,
+      tracking_token: null,
+      tracking_url: `${getStorefrontBaseUrl()}/track-order?id=${encodeURIComponent(String(order.order_number))}`,
+      tracking_link_mode: 'recovery',
+      tracking_token_ttl_days: null,
+    };
+  }
 
   return {
     ...order,
     tracking_token: trackingToken,
     tracking_url: `${getStorefrontBaseUrl()}/track-order?t=${encodeURIComponent(trackingToken)}`,
+    tracking_link_mode: 'secure',
     tracking_token_ttl_days: getTokenTtlDays(),
   };
 }
