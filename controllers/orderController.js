@@ -158,6 +158,52 @@ function maskPhone(value) {
   return `${'*'.repeat(Math.max(4, digits.length - 4))}${digits.slice(-4)}`;
 }
 
+function normalizeAnswerText(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function parseMoneyAnswer(value) {
+  const cleaned = String(value || '').replace(/[^\d.]/g, '');
+  if (!cleaned) return null;
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function verifyTrackingRecoveryAnswer(order, verificationType, answer) {
+  const type = String(verificationType || '').trim().toLowerCase();
+  const value = String(answer || '').trim();
+
+  if (!value) return false;
+
+  if (type === 'total' || type === 'amount' || type === 'order_total') {
+    const answerAmount = parseMoneyAnswer(value);
+    if (answerAmount == null) return false;
+
+    const total = roundMoney(order.total_amount);
+    return Math.abs(roundMoney(answerAmount) - total) <= 1;
+  }
+
+  if (type === 'location' || type === 'delivery_area' || type === 'area') {
+    const answerText = normalizeAnswerText(value);
+    if (answerText.length < 3) return false;
+
+    const locationText = normalizeAnswerText([
+      order.delivery_address,
+      order.route_area,
+      order.notes,
+    ].filter(Boolean).join(' '));
+
+    return locationText.length >= 3 && locationText.includes(answerText);
+  }
+
+  return false;
+}
+
 function normalizeWorkflowType(value) {
   const normalized = String(value || '').trim().toLowerCase();
   if (!normalized) return null;
@@ -2346,6 +2392,13 @@ const trackPublicOrder = async (req, res) => {
     const orderNumber = String(req.query.order_number || '').trim();
     const phoneDigits = String(req.query.customer_phone || '').replace(/\D/g, '');
     const phoneVariants = getPhoneLookupVariants(req.query.customer_phone);
+    const phoneLast3Digits = String(req.query.phone_last3 || req.query.phone_last_digits || '')
+      .replace(/\D/g, '');
+    const phoneLast3 = phoneLast3Digits.length >= 3 ? phoneLast3Digits.slice(-3) : '';
+    const verificationType = String(req.query.verification_type || '').trim().toLowerCase();
+    const verificationAnswer = String(req.query.verification_answer || '').trim();
+    const recoveryVerification =
+      Boolean(orderNumber && phoneLast3 && verificationType && verificationAnswer);
 
     let trackingClaims = null;
     let accessLevel = 'manual_verification';
@@ -2358,18 +2411,26 @@ const trackPublicOrder = async (req, res) => {
       }
 
       accessLevel = 'secure_link';
-    } else if (!orderNumber || !phoneDigits) {
-      return handleError(res, 400, 'secure tracking token or order_number and customer_phone are required');
+    } else if (!orderNumber || (!phoneDigits && !recoveryVerification)) {
+      return handleError(res, 400, 'secure tracking token, full phone verification, or recovery verification is required');
     }
 
-    const whereClause = trackingClaims
-      ? 'WHERE o.id = $1 AND o.order_number = $2'
-      : `WHERE o.order_number = $1
-        AND regexp_replace(COALESCE(o.customer_phone, ''), '\\D', '', 'g') = ANY($2::text[])`;
+    let whereClause;
+    let queryParams;
 
-    const queryParams = trackingClaims
-      ? [trackingClaims.order_id, trackingClaims.order_number]
-      : [orderNumber, phoneVariants];
+    if (trackingClaims) {
+      whereClause = 'WHERE o.id = $1 AND o.order_number = $2';
+      queryParams = [trackingClaims.order_id, trackingClaims.order_number];
+    } else if (recoveryVerification && !phoneDigits) {
+      whereClause = `WHERE o.order_number = $1
+        AND RIGHT(regexp_replace(COALESCE(o.customer_phone, ''), '\\D', '', 'g'), 3) = $2`;
+      queryParams = [orderNumber, phoneLast3];
+      accessLevel = 'recovery_verification';
+    } else {
+      whereClause = `WHERE o.order_number = $1
+        AND regexp_replace(COALESCE(o.customer_phone, ''), '\\D', '', 'g') = ANY($2::text[])`;
+      queryParams = [orderNumber, phoneVariants];
+    }
 
     const orderResult = await pool.query(
       `
@@ -2393,6 +2454,10 @@ const trackPublicOrder = async (req, res) => {
     }
 
     const order = enrichOrder(orderResult.rows[0]);
+
+    if (accessLevel === 'recovery_verification' && !verifyTrackingRecoveryAnswer(order, verificationType, verificationAnswer)) {
+      return handleError(res, 404, 'Order not found for the provided verification details');
+    }
 
     const itemsResult = await pool.query(
       `

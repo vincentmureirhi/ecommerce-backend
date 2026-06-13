@@ -83,6 +83,83 @@ async function createAutoSkuThresholdRule(client, productName, minQtyWholesale) 
 
 const getAllProducts = async (req, res) => {
   try {
+    const {
+      search,
+      q,
+      category,
+      min,
+      max,
+      sort,
+      flash,
+    } = req.query;
+    const params = [];
+    const where = ['1=1'];
+
+    const searchText = String(search || q || '').trim();
+    if (searchText) {
+      params.push(`%${searchText}%`);
+      const idx = params.length;
+      where.push(`(
+        p.name ILIKE $${idx}
+        OR p.sku ILIKE $${idx}
+        OR COALESCE(p.description, '') ILIKE $${idx}
+        OR COALESCE(c.name, '') ILIKE $${idx}
+        OR COALESCE(d.name, '') ILIKE $${idx}
+      )`);
+    }
+
+    if (category && category !== 'all') {
+      const categoryId = Number(category);
+      if (Number.isInteger(categoryId) && categoryId > 0) {
+        params.push(categoryId);
+        where.push(`p.category_id = $${params.length}`);
+      }
+    }
+
+    const priceExpression = `COALESCE(active_flash_sale.discounted_price, p.retail_price, p.wholesale_price, 0)`;
+
+    if (min !== undefined && min !== '') {
+      const minPrice = Number(min);
+      if (Number.isFinite(minPrice) && minPrice >= 0) {
+        params.push(minPrice);
+        where.push(`${priceExpression} >= $${params.length}`);
+      }
+    }
+
+    if (max !== undefined && max !== '') {
+      const maxPrice = Number(max);
+      if (Number.isFinite(maxPrice) && maxPrice >= 0) {
+        params.push(maxPrice);
+        where.push(`${priceExpression} <= $${params.length}`);
+      }
+    }
+
+    if (flash === '1' || flash === 'true') {
+      where.push('active_flash_sale.id IS NOT NULL');
+    }
+
+    const orderBy = (() => {
+      switch (String(sort || '').toLowerCase()) {
+        case 'price-asc':
+          return `${priceExpression} ASC, p.name ASC`;
+        case 'price-desc':
+          return `${priceExpression} DESC, p.name ASC`;
+        case 'name-asc':
+          return 'p.name ASC, p.id DESC';
+        case 'name-desc':
+          return 'p.name DESC, p.id DESC';
+        default:
+          return `
+            CASE
+              WHEN active_flash_sale.id IS NOT NULL THEN 0
+              WHEN COALESCE(NULLIF(p.stock_status_override, ''), '') = 'limited_stock' THEN 1
+              ELSE 2
+            END ASC,
+            p.id DESC
+          `;
+      }
+    })();
+
     const r = await pool.query(`
       SELECT
         p.*,
@@ -156,8 +233,9 @@ const getAllProducts = async (req, res) => {
       LEFT JOIN pricing_rules pr ON pr.id = p.pricing_rule_id
       LEFT JOIN pricing_groups pg ON pg.id = pr.pricing_group_id
 
-      ORDER BY p.id DESC
-    `);
+      WHERE ${where.join(' AND ')}
+      ORDER BY ${orderBy}
+    `, params);
     return handleSuccess(res, 200, "Products retrieved", r.rows);
   } catch (err) {
     return handleError(res, 500, "Failed to retrieve products", err);
