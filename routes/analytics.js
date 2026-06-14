@@ -4,6 +4,7 @@ const express = require('express');
 const router = express.Router();
 const { verifyToken, requireAdmin } = require('../middleware/authMiddleware');
 const {
+  getDashboardOverview,
   getDashboardKPIs,
   getSalesTrend,
   getAlerts,
@@ -20,6 +21,8 @@ const {
 } = require('../controllers/analyticsController');
 
 router.use(verifyToken, requireAdmin);
+
+router.get('/overview', getDashboardOverview);
 
 // Existing routes
 router.get('/kpis', getDashboardKPIs);
