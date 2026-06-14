@@ -67,10 +67,22 @@ const orderTrackingRateLimiter = rateLimit({
   },
 });
 
+const vendorApplicationRateLimiter = rateLimit({
+  windowMs: envInt('VENDOR_APPLICATION_RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000, { min: 1000 }),
+  max: envInt('VENDOR_APPLICATION_RATE_LIMIT_MAX', 5, { min: 1 }),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many vendor applications from this device. Please retry later.',
+  },
+});
+
 module.exports = {
   apiRateLimiter,
   routeCustomerUpsertRateLimiter,
   salesRepLoginRateLimiter,
   salesRepRateLimiter,
   orderTrackingRateLimiter,
+  vendorApplicationRateLimiter,
 };
