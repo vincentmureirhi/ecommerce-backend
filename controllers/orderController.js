@@ -481,7 +481,9 @@ async function resolveAuthenticatedSalesRep(req, client) {
   try {
     decoded = jwt.verify(token, JWT_SECRET);
   } catch (err) {
-    return null;
+    throw new OrderValidationError('Sales rep login expired. Sign in again before capturing route orders.', {
+      code: 'SALES_REP_SESSION_EXPIRED',
+    });
   }
 
   if (decoded.token_type !== 'sales_rep' || decoded.role !== 'sales_rep' || !decoded.sales_rep_id) {
@@ -1135,6 +1137,30 @@ const guestCheckout = async (req, res) => {
 
     if (requestedWorkflowType === 'route_sales_rep_capture' && !effectiveSalesRepId) {
       return handleError(res, 400, 'sales_rep_id is required for route_sales_rep_capture workflow');
+    }
+
+    if (effectiveSalesRepId) {
+      const repCheck = await client.query(
+        `
+        SELECT id, is_active, status, must_change_password
+        FROM sales_reps
+        WHERE id = $1
+        LIMIT 1
+        `,
+        [effectiveSalesRepId]
+      );
+
+      if (repCheck.rows.length === 0 || !repCheck.rows[0].is_active || repCheck.rows[0].status === 'inactive') {
+        throw new OrderValidationError('Sales rep account is inactive or no longer exists. Sign in again before capturing route orders.', {
+          code: 'SALES_REP_SESSION_INVALID',
+        });
+      }
+
+      if (repCheck.rows[0].must_change_password) {
+        throw new OrderValidationError('Sales rep must change password before capturing orders', {
+          code: 'SALES_REP_PASSWORD_CHANGE_REQUIRED',
+        });
+      }
     }
 
     await client.query('BEGIN');
