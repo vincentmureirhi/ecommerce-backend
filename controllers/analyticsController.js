@@ -1148,6 +1148,314 @@ const getMorningSummary = async (req, res) => {
   }
 };
 
+function getRouteAnalyticsDateRange(query = {}) {
+  if (query.start_date || query.end_date) {
+    const endDate = query.end_date ? new Date(`${query.end_date}T23:59:59.999`) : new Date();
+    const startDate = query.start_date
+      ? new Date(`${query.start_date}T00:00:00.000`)
+      : new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    if (!Number.isNaN(startDate.getTime()) && !Number.isNaN(endDate.getTime())) {
+      return { startDate, endDate };
+    }
+  }
+
+  return getDateRange(query.filter || 'thismonth');
+}
+
+function buildRouteOperationScope(query = {}) {
+  const { startDate, endDate } = getRouteAnalyticsDateRange(query);
+  const regionId = query.region_id ? Number.parseInt(query.region_id, 10) : null;
+  const params = [startDate, endDate];
+  const regionClause = Number.isFinite(regionId) && regionId > 0 ? ' AND r.id = $3' : '';
+
+  if (regionClause) params.push(regionId);
+
+  return {
+    startDate,
+    endDate,
+    params,
+    regionClause,
+    regionId: regionClause ? regionId : null,
+  };
+}
+
+const getRouteOperations = async (req, res) => {
+  try {
+    const limit = parseLimit(req.query.limit, 10, 50);
+    const { startDate, endDate, params, regionClause, regionId } = buildRouteOperationScope(req.query);
+    const limitedParams = [...params, limit];
+    const limitParam = limitedParams.length;
+    const routeOrderFilter = "AND (o.order_type = 'route' OR o.notes ILIKE '%[ROUTE_CUSTOMER_ORDER]%')";
+
+    const routeCustomerParams = [];
+    let routeCustomerRegionClause = '';
+    if (regionId) {
+      routeCustomerParams.push(regionId);
+      routeCustomerRegionClause = ' AND r.id = $1';
+    }
+
+    const [
+      summaryResult,
+      routeCustomerCountResult,
+      regionLeaderboardResult,
+      topCustomersResult,
+      topSalesRepsResult,
+      topProductsResult,
+      statusSummaryResult,
+      dayPatternResult,
+      recentOrdersResult,
+    ] = await Promise.all([
+      pool.query(
+        `
+        SELECT
+          COUNT(DISTINCT o.id)::int AS route_orders,
+          COALESCE(SUM(o.total_amount), 0)::numeric AS route_value,
+          COUNT(DISTINCT o.customer_id)::int AS buying_route_customers,
+          COUNT(DISTINCT o.sales_rep_id)::int AS active_sales_reps,
+          COALESCE(AVG(o.total_amount), 0)::numeric AS average_order_value,
+          COUNT(*) FILTER (WHERE COALESCE(o.order_status, 'pending') = 'pending')::int AS captured_orders,
+          COUNT(*) FILTER (WHERE COALESCE(o.order_status, 'pending') = 'processing')::int AS packing_orders,
+          COUNT(*) FILTER (WHERE COALESCE(o.order_status, 'pending') = 'dispatched')::int AS out_for_delivery_orders,
+          COUNT(*) FILTER (WHERE COALESCE(o.order_status, 'pending') = 'completed')::int AS delivered_orders,
+          COUNT(*) FILTER (WHERE COALESCE(o.order_status, 'pending') = 'cancelled')::int AS cancelled_orders
+        FROM orders o
+        LEFT JOIN customers c ON c.id = o.customer_id
+        LEFT JOIN locations l ON l.id = c.location_id
+        LEFT JOIN regions r ON r.id = l.region_id
+        WHERE o.created_at >= $1
+          AND o.created_at <= $2
+          ${routeOrderFilter}
+          ${regionClause}
+        `,
+        params
+      ),
+      pool.query(
+        `
+        SELECT COUNT(DISTINCT c.id)::int AS total_route_customers
+        FROM customers c
+        LEFT JOIN locations l ON l.id = c.location_id
+        LEFT JOIN regions r ON r.id = l.region_id
+        WHERE c.customer_type = 'route'
+          AND COALESCE(c.is_active, TRUE) = TRUE
+          ${routeCustomerRegionClause}
+        `,
+        routeCustomerParams
+      ),
+      pool.query(
+        `
+        SELECT
+          r.id,
+          r.name,
+          COUNT(DISTINCT c.id)::int AS total_route_customers,
+          COUNT(DISTINCT CASE WHEN o.id IS NOT NULL THEN c.id END)::int AS buying_route_customers,
+          COUNT(DISTINCT o.id)::int AS order_count,
+          COALESCE(SUM(o.total_amount), 0)::numeric AS route_value,
+          COALESCE(AVG(o.total_amount), 0)::numeric AS average_order_value,
+          COUNT(*) FILTER (WHERE o.id IS NOT NULL AND COALESCE(o.order_status, 'pending') IN ('pending', 'processing'))::int AS shop_work_queue,
+          COUNT(*) FILTER (WHERE o.id IS NOT NULL AND COALESCE(o.order_status, 'pending') = 'dispatched')::int AS delivery_queue,
+          MAX(o.created_at) AS last_order_at
+        FROM regions r
+        LEFT JOIN locations l ON l.region_id = r.id
+        LEFT JOIN customers c ON c.location_id = l.id AND c.customer_type = 'route'
+        LEFT JOIN orders o
+          ON o.customer_id = c.id
+         AND o.created_at >= $1
+         AND o.created_at <= $2
+         AND (o.order_type = 'route' OR o.notes ILIKE '%[ROUTE_CUSTOMER_ORDER]%')
+        WHERE 1 = 1
+          ${regionClause}
+        GROUP BY r.id, r.name
+        ORDER BY route_value DESC, order_count DESC, r.name ASC
+        `,
+        params
+      ),
+      pool.query(
+        `
+        SELECT
+          c.id,
+          COALESCE(c.name, o.customer_name) AS name,
+          COALESCE(c.phone, o.customer_phone) AS phone,
+          l.name AS location_name,
+          r.name AS region_name,
+          COUNT(DISTINCT o.id)::int AS order_count,
+          COALESCE(SUM(o.total_amount), 0)::numeric AS total_spent,
+          COALESCE(AVG(o.total_amount), 0)::numeric AS average_order_value,
+          MAX(o.created_at) AS last_order_at
+        FROM orders o
+        LEFT JOIN customers c ON c.id = o.customer_id
+        LEFT JOIN locations l ON l.id = c.location_id
+        LEFT JOIN regions r ON r.id = l.region_id
+        WHERE o.created_at >= $1
+          AND o.created_at <= $2
+          ${routeOrderFilter}
+          ${regionClause}
+        GROUP BY c.id, c.name, c.phone, o.customer_name, o.customer_phone, l.name, r.name
+        ORDER BY total_spent DESC, order_count DESC
+        LIMIT $${limitParam}
+        `,
+        limitedParams
+      ),
+      pool.query(
+        `
+        SELECT
+          sr.id,
+          COALESCE(sr.full_name, sr.name, 'Unassigned') AS name,
+          COALESCE(sr.phone, sr.phone_number) AS phone,
+          COUNT(DISTINCT o.id)::int AS order_count,
+          COUNT(DISTINCT o.customer_id)::int AS customer_count,
+          COALESCE(SUM(o.total_amount), 0)::numeric AS route_value,
+          COALESCE(AVG(o.total_amount), 0)::numeric AS average_order_value,
+          MAX(o.created_at) AS last_order_at
+        FROM orders o
+        LEFT JOIN sales_reps sr ON sr.id = o.sales_rep_id
+        LEFT JOIN customers c ON c.id = o.customer_id
+        LEFT JOIN locations l ON l.id = c.location_id
+        LEFT JOIN regions r ON r.id = l.region_id
+        WHERE o.created_at >= $1
+          AND o.created_at <= $2
+          ${routeOrderFilter}
+          ${regionClause}
+        GROUP BY sr.id, sr.full_name, sr.name, sr.phone, sr.phone_number
+        ORDER BY route_value DESC, order_count DESC
+        LIMIT $${limitParam}
+        `,
+        limitedParams
+      ),
+      pool.query(
+        `
+        SELECT
+          p.id,
+          p.name,
+          p.sku,
+          p.current_stock,
+          COALESCE(SUM(oi.quantity), 0)::int AS units_ordered,
+          COUNT(DISTINCT o.id)::int AS order_count,
+          COALESCE(SUM(COALESCE(oi.line_total, oi.quantity * oi.price_at_purchase)), 0)::numeric AS route_value
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        LEFT JOIN products p ON p.id = oi.product_id
+        LEFT JOIN customers c ON c.id = o.customer_id
+        LEFT JOIN locations l ON l.id = c.location_id
+        LEFT JOIN regions r ON r.id = l.region_id
+        WHERE o.created_at >= $1
+          AND o.created_at <= $2
+          ${routeOrderFilter}
+          ${regionClause}
+        GROUP BY p.id, p.name, p.sku, p.current_stock
+        ORDER BY units_ordered DESC, route_value DESC
+        LIMIT $${limitParam}
+        `,
+        limitedParams
+      ),
+      pool.query(
+        `
+        SELECT
+          COALESCE(o.order_status, 'pending') AS status,
+          COUNT(DISTINCT o.id)::int AS order_count,
+          COALESCE(SUM(o.total_amount), 0)::numeric AS route_value
+        FROM orders o
+        LEFT JOIN customers c ON c.id = o.customer_id
+        LEFT JOIN locations l ON l.id = c.location_id
+        LEFT JOIN regions r ON r.id = l.region_id
+        WHERE o.created_at >= $1
+          AND o.created_at <= $2
+          ${routeOrderFilter}
+          ${regionClause}
+        GROUP BY COALESCE(o.order_status, 'pending')
+        ORDER BY order_count DESC
+        `,
+        params
+      ),
+      pool.query(
+        `
+        SELECT
+          EXTRACT(ISODOW FROM o.created_at AT TIME ZONE 'Africa/Nairobi')::int AS day_number,
+          TO_CHAR(o.created_at AT TIME ZONE 'Africa/Nairobi', 'Dy') AS day_name,
+          COUNT(DISTINCT o.id)::int AS order_count,
+          COUNT(DISTINCT o.customer_id)::int AS customer_count,
+          COALESCE(SUM(o.total_amount), 0)::numeric AS route_value
+        FROM orders o
+        LEFT JOIN customers c ON c.id = o.customer_id
+        LEFT JOIN locations l ON l.id = c.location_id
+        LEFT JOIN regions r ON r.id = l.region_id
+        WHERE o.created_at >= $1
+          AND o.created_at <= $2
+          ${routeOrderFilter}
+          ${regionClause}
+        GROUP BY day_number, day_name
+        ORDER BY day_number ASC
+        `,
+        params
+      ),
+      pool.query(
+        `
+        SELECT
+          o.id,
+          o.order_number,
+          o.customer_name,
+          o.customer_phone,
+          o.total_amount,
+          o.order_status,
+          o.created_at,
+          COALESCE(sr.full_name, sr.name) AS sales_rep_name,
+          l.name AS location_name,
+          r.name AS region_name
+        FROM orders o
+        LEFT JOIN sales_reps sr ON sr.id = o.sales_rep_id
+        LEFT JOIN customers c ON c.id = o.customer_id
+        LEFT JOIN locations l ON l.id = c.location_id
+        LEFT JOIN regions r ON r.id = l.region_id
+        WHERE o.created_at >= $1
+          AND o.created_at <= $2
+          ${routeOrderFilter}
+          ${regionClause}
+        ORDER BY o.created_at DESC
+        LIMIT $${limitParam}
+        `,
+        limitedParams
+      ),
+    ]);
+
+    const summary = summaryResult.rows[0] || {};
+    const totalRouteCustomers = routeCustomerCountResult.rows[0]?.total_route_customers || 0;
+    const shopQueue = toInt(summary.captured_orders) + toInt(summary.packing_orders);
+
+    return handleSuccess(res, 200, 'Route operations retrieved', {
+      filters: {
+        filter: req.query.filter || 'thismonth',
+        start_date: startDate.toISOString(),
+        end_date: endDate.toISOString(),
+        region_id: regionId,
+      },
+      summary: {
+        ...summary,
+        total_route_customers: totalRouteCustomers,
+        shop_work_queue: shopQueue,
+        delivery_queue: toInt(summary.out_for_delivery_orders),
+      },
+      region_leaderboard: regionLeaderboardResult.rows,
+      top_route_customers: topCustomersResult.rows,
+      top_sales_reps: topSalesRepsResult.rows,
+      top_products: topProductsResult.rows,
+      status_summary: statusSummaryResult.rows,
+      day_pattern: dayPatternResult.rows,
+      recent_route_orders: recentOrdersResult.rows,
+      operating_model: {
+        main_route_capture: 'Monday and Tuesday route capture.',
+        main_route_close: 'Wednesday shop finalization and packing.',
+        main_route_delivery: 'Thursday to Saturday delivery and collection.',
+        mwatate_capture: 'MWATATE route capture every Thursday and Friday.',
+        mwatate_delivery: 'MWATATE delivery release on Saturday.',
+        settlement_rule: 'Route customers pay on delivery unless approved credit terms apply.',
+      },
+    });
+  } catch (err) {
+    console.error('Get route operations error:', err.message);
+    return handleError(res, 500, 'Failed to get route operations', err);
+  }
+};
+
 module.exports = {
   getDashboardOverview,
   getDashboardKPIs,
@@ -1163,4 +1471,5 @@ module.exports = {
   getRecentActivity,
   getInventoryIntelligence,
   getMorningSummary,
+  getRouteOperations,
 };

@@ -18,6 +18,7 @@ const {
   getRecentActivity,
   getInventoryIntelligence,
   getMorningSummary,
+  getRouteOperations,
 } = require('../controllers/analyticsController');
 
 router.use(verifyToken, requireAdmin);
@@ -40,5 +41,6 @@ router.get('/payment-health', getPaymentHealth);
 router.get('/recent-activity', getRecentActivity);
 router.get('/inventory-intelligence', getInventoryIntelligence);
 router.get('/morning-summary', getMorningSummary);
+router.get('/route-operations', getRouteOperations);
 
 module.exports = router;
