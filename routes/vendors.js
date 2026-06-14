@@ -6,6 +6,7 @@ const { verifyVendorToken, requireVendorOwnerOrManager } = require('../middlewar
 const {
   vendorApplicationRateLimiter,
   vendorLoginRateLimiter,
+  vendorMessageRateLimiter,
   vendorPortalRateLimiter,
 } = require('../middleware/rateLimitMiddleware');
 const controller = require('../controllers/vendorController');
@@ -16,11 +17,15 @@ const router = express.Router();
 router.get('/plans/public', controller.listPublicVendorPlans);
 router.post('/applications/public', vendorApplicationRateLimiter, controller.submitVendorApplication);
 router.get('/public/stores', controller.listPublicVendorStores);
+router.post('/public/stores/:slug/messages', vendorMessageRateLimiter, controller.createPublicVendorMessage);
 router.get('/public/stores/:slug', controller.getPublicVendorStoreBySlug);
 
 // Vendor portal
 router.post('/auth/login', vendorLoginRateLimiter, controller.loginVendor);
 router.get('/me', vendorPortalRateLimiter, verifyVendorToken, controller.getVendorMe);
+router.get('/me/analytics', vendorPortalRateLimiter, verifyVendorToken, controller.getVendorAnalytics);
+router.get('/me/messages', vendorPortalRateLimiter, verifyVendorToken, controller.listMyVendorMessages);
+router.patch('/me/messages/:id', vendorPortalRateLimiter, verifyVendorToken, controller.updateMyVendorMessageStatus);
 router.put('/me/password', vendorPortalRateLimiter, verifyVendorToken, controller.changeVendorPassword);
 router.patch('/me/store', vendorPortalRateLimiter, verifyVendorToken, requireVendorOwnerOrManager, controller.updateMyVendorProfile);
 router.get('/me/products', vendorPortalRateLimiter, verifyVendorToken, controller.listMyVendorProductSubmissions);
@@ -47,6 +52,7 @@ router.get('/plans', verifyToken, requireAdmin, controller.listVendorPlans);
 router.post('/plans', verifyToken, requireAdmin, controller.createVendorPlan);
 router.put('/plans/:id', verifyToken, requireAdmin, controller.updateVendorPlan);
 router.get('/:id', verifyToken, requireAdmin, controller.getVendorById);
+router.post('/:id/reset-owner-password', verifyToken, requireAdmin, controller.resetVendorOwnerPassword);
 router.patch('/:id', verifyToken, requireAdmin, controller.updateVendor);
 
 module.exports = router;

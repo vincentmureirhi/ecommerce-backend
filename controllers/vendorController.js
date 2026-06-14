@@ -11,6 +11,7 @@ const VENDOR_STATUSES = ['pending', 'active', 'suspended', 'closed'];
 const VERIFICATION_STATUSES = ['unverified', 'pending', 'verified', 'rejected'];
 const FULFILLMENT_MODELS = ['xpose_reviewed', 'xpose_fulfilled', 'vendor_fulfilled', 'hybrid'];
 const PRODUCT_SUBMISSION_STATUSES = ['draft', 'submitted', 'changes_requested', 'approved', 'rejected', 'archived'];
+const VENDOR_MESSAGE_STATUSES = ['new', 'read', 'closed'];
 
 function trimOrNull(value) {
   if (typeof value !== 'string') return null;
@@ -203,6 +204,26 @@ function mapPublicVendor(row) {
     minimum_price: row.minimum_price,
     storefront_featured: Boolean(row.storefront_featured),
     published_at: row.published_at,
+  };
+}
+
+function mapVendorMessage(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    vendor_id: row.vendor_id,
+    product_id: row.product_id,
+    product_name: row.product_name || null,
+    customer_name: row.customer_name,
+    customer_phone: row.customer_phone,
+    customer_email: row.customer_email,
+    message: row.message,
+    source: row.source,
+    status: row.status,
+    vendor_notes: row.vendor_notes,
+    admin_notes: row.admin_notes,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
   };
 }
 
@@ -1332,6 +1353,434 @@ const updateVendor = async (req, res) => {
   }
 };
 
+const resetVendorOwnerPassword = async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const accountResult = await client.query(
+      `
+      SELECT
+        vu.*,
+        v.store_name,
+        v.store_slug
+      FROM vendor_users vu
+      JOIN vendors v ON v.id = vu.vendor_id
+      WHERE vu.vendor_id = $1
+        AND vu.role = 'owner'
+      ORDER BY vu.created_at ASC
+      LIMIT 1
+      FOR UPDATE OF vu
+      `,
+      [req.params.id]
+    );
+
+    if (accountResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return handleError(res, 404, 'Vendor owner account was not found');
+    }
+
+    const account = accountResult.rows[0];
+    const temporaryPassword = generateTemporaryPassword();
+    const passwordHash = await bcrypt.hash(temporaryPassword, 12);
+
+    const updateResult = await client.query(
+      `
+      UPDATE vendor_users
+      SET password_hash = $1,
+          must_change_password = TRUE,
+          last_password_reset_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $2
+      RETURNING id, vendor_id, full_name, email, phone, username, role, status, must_change_password, last_login_at, created_at
+      `,
+      [passwordHash, account.id]
+    );
+
+    await client.query(
+      `
+      INSERT INTO vendor_audit_logs
+        (vendor_id, actor_type, actor_id, action, details)
+      VALUES ($1, 'admin', $2, 'owner_password_reset', $3::jsonb)
+      `,
+      [
+        account.vendor_id,
+        getActorId(req),
+        JSON.stringify({
+          vendor_user_id: account.id,
+          username: account.username,
+          reason: trimOrNull(req.body?.reason) || 'admin_reset',
+        }),
+      ]
+    );
+
+    await client.query('COMMIT');
+
+    return handleSuccess(res, 200, 'Vendor owner password reset', {
+      vendor_id: account.vendor_id,
+      store_name: account.store_name,
+      store_slug: account.store_slug,
+      vendor_user: mapVendorUser(updateResult.rows[0]),
+      username: account.username,
+      temporary_password: temporaryPassword,
+      must_change_password: true,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    return handleError(res, 500, 'Failed to reset vendor owner password', err);
+  } finally {
+    client.release();
+  }
+};
+
+const getVendorAnalytics = async (req, res) => {
+  try {
+    const vendorId = req.vendorUser.vendor_id;
+    const days = Math.min(Math.max(parseInteger(req.query?.days, 30), 1), 365);
+    const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const [
+      productStatsResult,
+      salesStatsResult,
+      topProductsResult,
+      trendResult,
+      submissionStatsResult,
+      messageStatsResult,
+    ] = await Promise.all([
+      pool.query(
+        `
+        SELECT
+          COUNT(*)::int AS total_products,
+          COUNT(*) FILTER (WHERE vendor_approval_status = 'approved')::int AS approved_products,
+          COUNT(*) FILTER (
+            WHERE vendor_approval_status = 'approved'
+              AND COALESCE(is_active, TRUE) = TRUE
+          )::int AS live_products,
+          COUNT(*) FILTER (
+            WHERE vendor_approval_status = 'approved'
+              AND COALESCE(is_active, TRUE) = TRUE
+              AND COALESCE(current_stock, 0) <= 0
+          )::int AS out_of_stock_products,
+          COUNT(*) FILTER (
+            WHERE vendor_approval_status = 'approved'
+              AND COALESCE(is_active, TRUE) = TRUE
+              AND COALESCE(current_stock, 0) > 0
+              AND COALESCE(current_stock, 0) <= GREATEST(COALESCE(min_order_qty, 1), COALESCE(reorder_level, 10), 10)
+          )::int AS limited_stock_products,
+          COALESCE(SUM(COALESCE(current_stock, 0)), 0)::int AS stock_units,
+          COALESCE(SUM(COALESCE(current_stock, 0) * COALESCE(cost_price, 0)), 0)::numeric(14,2) AS stock_value
+        FROM products
+        WHERE vendor_id = $1
+          AND product_owner_type = 'vendor'
+        `,
+        [vendorId]
+      ),
+      pool.query(
+        `
+        SELECT
+          COUNT(DISTINCT o.id)::int AS order_count,
+          COALESCE(SUM(oi.quantity), 0)::int AS units_ordered,
+          COALESCE(SUM(COALESCE(oi.line_total, oi.quantity * oi.price_at_purchase)), 0)::numeric(14,2) AS gross_sales,
+          MAX(o.created_at) AS last_order_at
+        FROM products p
+        JOIN order_items oi ON oi.product_id = p.id
+        JOIN orders o ON o.id = oi.order_id
+        WHERE p.vendor_id = $1
+          AND p.product_owner_type = 'vendor'
+          AND o.created_at >= $2
+          AND LOWER(COALESCE(o.order_status, 'pending')) <> 'cancelled'
+        `,
+        [vendorId, startDate]
+      ),
+      pool.query(
+        `
+        SELECT
+          p.id,
+          p.name,
+          p.image_url,
+          COALESCE(p.current_stock, 0)::int AS current_stock,
+          COALESCE(SUM(oi.quantity), 0)::int AS units_ordered,
+          COALESCE(SUM(COALESCE(oi.line_total, oi.quantity * oi.price_at_purchase)), 0)::numeric(14,2) AS gross_sales
+        FROM products p
+        JOIN order_items oi ON oi.product_id = p.id
+        JOIN orders o ON o.id = oi.order_id
+        WHERE p.vendor_id = $1
+          AND p.product_owner_type = 'vendor'
+          AND o.created_at >= $2
+          AND LOWER(COALESCE(o.order_status, 'pending')) <> 'cancelled'
+        GROUP BY p.id, p.name, p.image_url, p.current_stock
+        ORDER BY gross_sales DESC, units_ordered DESC
+        LIMIT 8
+        `,
+        [vendorId, startDate]
+      ),
+      pool.query(
+        `
+        SELECT
+          TO_CHAR(day::date, 'Mon DD') AS label,
+          COALESCE(SUM(
+            CASE
+              WHEN p.id IS NOT NULL THEN COALESCE(oi.line_total, oi.quantity * oi.price_at_purchase)
+              ELSE 0
+            END
+          ), 0)::numeric(14,2) AS gross_sales,
+          COALESCE(SUM(CASE WHEN p.id IS NOT NULL THEN oi.quantity ELSE 0 END), 0)::int AS units_ordered,
+          COUNT(DISTINCT CASE WHEN p.id IS NOT NULL THEN o.id END)::int AS orders
+        FROM generate_series($2::date, CURRENT_DATE, INTERVAL '1 day') day
+        LEFT JOIN orders o
+          ON o.created_at >= day
+         AND o.created_at < day + INTERVAL '1 day'
+         AND LOWER(COALESCE(o.order_status, 'pending')) <> 'cancelled'
+        LEFT JOIN order_items oi ON oi.order_id = o.id
+        LEFT JOIN products p
+          ON p.id = oi.product_id
+         AND p.vendor_id = $1
+         AND p.product_owner_type = 'vendor'
+        GROUP BY day
+        ORDER BY day ASC
+        `,
+        [vendorId, startDate]
+      ),
+      pool.query(
+        `
+        SELECT
+          COUNT(*) FILTER (WHERE submission_status = 'draft')::int AS drafts,
+          COUNT(*) FILTER (WHERE submission_status = 'submitted')::int AS submitted,
+          COUNT(*) FILTER (WHERE submission_status = 'changes_requested')::int AS changes_requested,
+          COUNT(*) FILTER (WHERE submission_status = 'approved')::int AS approved,
+          COUNT(*) FILTER (WHERE submission_status = 'rejected')::int AS rejected
+        FROM vendor_product_submissions
+        WHERE vendor_id = $1
+        `,
+        [vendorId]
+      ),
+      pool.query(
+        `
+        SELECT
+          COUNT(*)::int AS total_messages,
+          COUNT(*) FILTER (WHERE status = 'new')::int AS new_messages,
+          COUNT(*) FILTER (WHERE status = 'read')::int AS read_messages,
+          COUNT(*) FILTER (WHERE status = 'closed')::int AS closed_messages
+        FROM vendor_customer_messages
+        WHERE vendor_id = $1
+        `,
+        [vendorId]
+      ),
+    ]);
+
+    const productStats = productStatsResult.rows[0] || {};
+    const salesStats = salesStatsResult.rows[0] || {};
+    const submissionStats = submissionStatsResult.rows[0] || {};
+    const messageStats = messageStatsResult.rows[0] || {};
+
+    return handleSuccess(res, 200, 'Vendor analytics retrieved', {
+      range_days: days,
+      product_stats: {
+        total_products: parseInteger(productStats.total_products, 0),
+        approved_products: parseInteger(productStats.approved_products, 0),
+        live_products: parseInteger(productStats.live_products, 0),
+        out_of_stock_products: parseInteger(productStats.out_of_stock_products, 0),
+        limited_stock_products: parseInteger(productStats.limited_stock_products, 0),
+        stock_units: parseInteger(productStats.stock_units, 0),
+        stock_value: parseNumber(productStats.stock_value, 0),
+      },
+      sales: {
+        order_count: parseInteger(salesStats.order_count, 0),
+        units_ordered: parseInteger(salesStats.units_ordered, 0),
+        gross_sales: parseNumber(salesStats.gross_sales, 0),
+        last_order_at: salesStats.last_order_at || null,
+      },
+      submissions: {
+        drafts: parseInteger(submissionStats.drafts, 0),
+        submitted: parseInteger(submissionStats.submitted, 0),
+        changes_requested: parseInteger(submissionStats.changes_requested, 0),
+        approved: parseInteger(submissionStats.approved, 0),
+        rejected: parseInteger(submissionStats.rejected, 0),
+      },
+      messages: {
+        total_messages: parseInteger(messageStats.total_messages, 0),
+        new_messages: parseInteger(messageStats.new_messages, 0),
+        read_messages: parseInteger(messageStats.read_messages, 0),
+        closed_messages: parseInteger(messageStats.closed_messages, 0),
+      },
+      top_products: topProductsResult.rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        image_url: row.image_url,
+        current_stock: parseInteger(row.current_stock, 0),
+        units_ordered: parseInteger(row.units_ordered, 0),
+        gross_sales: parseNumber(row.gross_sales, 0),
+      })),
+      trend: trendResult.rows.map((row) => ({
+        label: row.label,
+        gross_sales: parseNumber(row.gross_sales, 0),
+        units_ordered: parseInteger(row.units_ordered, 0),
+        orders: parseInteger(row.orders, 0),
+      })),
+    });
+  } catch (err) {
+    return handleError(res, 500, 'Failed to retrieve vendor analytics', err);
+  }
+};
+
+const listMyVendorMessages = async (req, res) => {
+  try {
+    const status = trimOrNull(req.query?.status);
+    const params = [req.vendorUser.vendor_id];
+    const where = ['m.vendor_id = $1'];
+
+    if (status) {
+      if (!VENDOR_MESSAGE_STATUSES.includes(status)) {
+        return handleError(res, 400, 'Invalid message status');
+      }
+      params.push(status);
+      where.push(`m.status = $${params.length}`);
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        m.*,
+        p.name AS product_name
+      FROM vendor_customer_messages m
+      LEFT JOIN products p ON p.id = m.product_id
+      WHERE ${where.join(' AND ')}
+      ORDER BY
+        CASE m.status WHEN 'new' THEN 0 WHEN 'read' THEN 1 ELSE 2 END,
+        m.created_at DESC
+      LIMIT 100
+      `,
+      params
+    );
+
+    return handleSuccess(res, 200, 'Vendor messages retrieved', result.rows.map(mapVendorMessage));
+  } catch (err) {
+    return handleError(res, 500, 'Failed to retrieve vendor messages', err);
+  }
+};
+
+const updateMyVendorMessageStatus = async (req, res) => {
+  try {
+    const status = trimOrNull(req.body?.status);
+    const vendorNotes = req.body?.vendor_notes === undefined ? undefined : trimOrNull(req.body.vendor_notes);
+
+    if (!VENDOR_MESSAGE_STATUSES.includes(status)) {
+      return handleError(res, 400, 'Invalid message status');
+    }
+
+    const params = [req.params.id, req.vendorUser.vendor_id, status];
+    const updates = ['status = $3'];
+
+    if (vendorNotes !== undefined) {
+      params.push(vendorNotes);
+      updates.push(`vendor_notes = $${params.length}`);
+    }
+
+    const result = await pool.query(
+      `
+      UPDATE vendor_customer_messages
+      SET ${updates.join(', ')}, updated_at = NOW()
+      WHERE id = $1
+        AND vendor_id = $2
+      RETURNING *
+      `,
+      params
+    );
+
+    if (result.rows.length === 0) {
+      return handleError(res, 404, 'Vendor message not found');
+    }
+
+    return handleSuccess(res, 200, 'Vendor message updated', mapVendorMessage(result.rows[0]));
+  } catch (err) {
+    return handleError(res, 500, 'Failed to update vendor message', err);
+  }
+};
+
+const createPublicVendorMessage = async (req, res) => {
+  try {
+    const body = req.body || {};
+    const customerName = trimOrNull(body.customer_name || body.name);
+    const customerPhone = trimOrNull(body.customer_phone || body.phone);
+    const customerEmail = normalizeEmail(body.customer_email || body.email);
+    const message = trimOrNull(body.message);
+    const productId = parseInteger(body.product_id, null);
+
+    if (!customerName) return handleError(res, 400, 'Your name is required');
+    if (!customerPhone && !customerEmail) return handleError(res, 400, 'A phone number or email is required');
+    if (!message || message.length < 8) return handleError(res, 400, 'Message must be at least 8 characters');
+    if (message.length > 1500) return handleError(res, 400, 'Message is too long');
+
+    const vendorResult = await pool.query(
+      `
+      SELECT id, store_name
+      FROM vendors
+      WHERE store_slug = $1
+        AND status = 'active'
+        AND verification_status = 'verified'
+        AND store_visibility_status = 'public'
+      LIMIT 1
+      `,
+      [req.params.slug]
+    );
+
+    if (vendorResult.rows.length === 0) {
+      return handleError(res, 404, 'Vendor store not found');
+    }
+
+    const vendor = vendorResult.rows[0];
+
+    if (productId) {
+      const productResult = await pool.query(
+        `
+        SELECT id
+        FROM products
+        WHERE id = $1
+          AND vendor_id = $2
+          AND product_owner_type = 'vendor'
+          AND vendor_approval_status = 'approved'
+        LIMIT 1
+        `,
+        [productId, vendor.id]
+      );
+
+      if (productResult.rows.length === 0) {
+        return handleError(res, 400, 'Selected product does not belong to this store');
+      }
+    }
+
+    const result = await pool.query(
+      `
+      INSERT INTO vendor_customer_messages
+        (vendor_id, product_id, customer_name, customer_phone, customer_email, message, source)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING *
+      `,
+      [
+        vendor.id,
+        productId,
+        customerName,
+        customerPhone,
+        customerEmail,
+        message,
+        productId ? 'product_page' : 'storefront',
+      ]
+    );
+
+    await pool.query('UPDATE vendors SET last_customer_message_at = NOW(), updated_at = NOW() WHERE id = $1', [vendor.id]);
+
+    return handleSuccess(res, 201, 'Message sent to vendor', {
+      id: result.rows[0].id,
+      store_name: vendor.store_name,
+      status: result.rows[0].status,
+      created_at: result.rows[0].created_at,
+    });
+  } catch (err) {
+    return handleError(res, 500, 'Failed to send vendor message', err);
+  }
+};
+
 const getVendorMe = async (req, res) => {
   try {
     const vendorId = req.vendorUser.vendor_id;
@@ -2374,7 +2823,12 @@ module.exports = {
   listVendors,
   getVendorById,
   updateVendor,
+  resetVendorOwnerPassword,
   getVendorMe,
+  getVendorAnalytics,
+  listMyVendorMessages,
+  updateMyVendorMessageStatus,
+  createPublicVendorMessage,
   changeVendorPassword,
   updateMyVendorProfile,
   listMyVendorProductSubmissions,

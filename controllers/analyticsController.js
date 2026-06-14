@@ -147,6 +147,7 @@ const getDashboardOverview = async (req, res) => {
         period_orders AS (
           SELECT
             COUNT(*)::int AS orders,
+            COALESCE(SUM(total_amount), 0)::numeric(14,2) AS ordered_value,
             COUNT(DISTINCT COALESCE(NULLIF(customer_phone, ''), NULLIF(customer_name, ''), customer_id::text))::int AS customers
           FROM orders
           WHERE created_at >= $1
@@ -165,6 +166,7 @@ const getDashboardOverview = async (req, res) => {
         SELECT
           pp.revenue,
           po.orders,
+          po.ordered_value,
           po.customers,
           py.pending_payments,
           CASE
@@ -180,16 +182,26 @@ const getDashboardOverview = async (req, res) => {
         `
         SELECT
           TO_CHAR(day::date, 'Mon DD') AS date,
-          COALESCE(SUM(COALESCE(p.received_amount, p.amount, 0)), 0)::numeric(14,2) AS revenue,
-          COUNT(DISTINCT o.id)::int AS orders
+          COALESCE(payment_stats.revenue, 0)::numeric(14,2) AS revenue,
+          COALESCE(order_stats.booked_sales, 0)::numeric(14,2) AS booked_sales,
+          COALESCE(order_stats.orders, 0)::int AS orders
         FROM generate_series($1::date, $2::date, INTERVAL '1 day') day
-        LEFT JOIN payments p
-          ON p.created_at >= day
-         AND p.created_at < day + INTERVAL '1 day'
-         AND LOWER(p.status) = ANY($3::text[])
-        LEFT JOIN orders o
-          ON o.id = p.order_id
-        GROUP BY day
+        LEFT JOIN LATERAL (
+          SELECT COALESCE(SUM(COALESCE(p.received_amount, p.amount, 0)), 0)::numeric(14,2) AS revenue
+          FROM payments p
+          WHERE p.created_at >= day
+            AND p.created_at < day + INTERVAL '1 day'
+            AND LOWER(p.status) = ANY($3::text[])
+        ) payment_stats ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT
+            COUNT(*)::int AS orders,
+            COALESCE(SUM(o.total_amount), 0)::numeric(14,2) AS booked_sales
+          FROM orders o
+          WHERE o.created_at >= day
+            AND o.created_at < day + INTERVAL '1 day'
+            AND LOWER(COALESCE(o.order_status, 'pending')) <> 'cancelled'
+        ) order_stats ON TRUE
         ORDER BY day ASC
         `,
         [startDate, endDate, paidStatuses]
@@ -447,6 +459,7 @@ const getDashboardOverview = async (req, res) => {
     const morning = morningSummaryResult.rows[0] || {};
 
     const revenue = toNumber(kpi.revenue);
+    const bookedSales = toNumber(kpi.ordered_value);
     const orders = toInt(kpi.orders);
     const paymentSuccessRate = toInt(kpi.payment_success_rate);
     const pendingPayments = toInt(kpi.pending_payments);
@@ -521,8 +534,9 @@ const getDashboardOverview = async (req, res) => {
       },
       kpis: {
         revenue: Math.round(revenue),
+        booked_sales: Math.round(bookedSales),
         orders,
-        aov: orders > 0 ? Math.round(revenue / orders) : 0,
+        aov: orders > 0 ? Math.round(bookedSales / orders) : 0,
         payment_success_rate: paymentSuccessRate,
         failed_payments: toInt(kpi.failed_payments),
         pending_payments: pendingPayments,
@@ -530,7 +544,7 @@ const getDashboardOverview = async (req, res) => {
         out_of_stock: inventoryIntelligence.out_of_stock,
         awaiting_dispatch: toInt(kpi.awaiting_dispatch),
         new_customers: newCustomers,
-        revenue_trend: percentChange(revenue, previous.revenue),
+        revenue_trend: percentChange(bookedSales, previous.ordered_value),
         orders_trend: percentChange(orders, previous.orders),
         payment_trend: percentChange(paymentSuccessRate, previous.payment_success_rate),
         pending_trend: percentChange(pendingPayments, previous.pending_payments),
@@ -539,7 +553,8 @@ const getDashboardOverview = async (req, res) => {
       trend: trendResult.rows.map((row) => ({
         date: row.date,
         orders: toInt(row.orders),
-        revenue: Math.round(toNumber(row.revenue)),
+        revenue: Math.round(toNumber(row.booked_sales)),
+        paid_revenue: Math.round(toNumber(row.revenue)),
       })),
       alerts,
       top_products: topProductsResult.rows.map((row) => ({
