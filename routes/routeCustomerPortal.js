@@ -50,5 +50,7 @@ router.delete(
 router.get('/admin/customers', verifyToken, requireAdmin, controller.listRouteCustomers);
 router.post('/admin/customers/:customerId/create-account', verifyToken, requireAdmin, controller.createAccountForExistingCustomer);
 router.post('/admin/customers/:customerId/access', verifyToken, requireAdmin, controller.saveRouteCustomerAccess);
+router.get('/admin/credit-limit-requests', verifyToken, requireAdmin, controller.listCreditLimitRequests);
+router.post('/admin/credit-limit-requests/:requestId/review', verifyToken, requireAdmin, controller.reviewCreditLimitRequest);
 
 module.exports = router;

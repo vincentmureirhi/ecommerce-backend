@@ -31,11 +31,19 @@ async function fetchCustomerById(id) {
       l.name AS location_name,
       r.name AS region_name,
       sr.name AS sales_rep_name,
-      sr.phone_number AS sales_rep_phone
+      COALESCE(sr.phone, sr.phone_number) AS sales_rep_phone,
+      COALESCE(fs.credit_limit, 0)::numeric(12,2) AS credit_limit,
+      COALESCE(fs.current_balance, 0)::numeric(12,2) AS current_balance,
+      COALESCE(fs.available_credit, 0)::numeric(12,2) AS available_credit,
+      COALESCE(fs.overdue_balance, 0)::numeric(12,2) AS overdue_balance,
+      COALESCE(fs.is_credit_active, TRUE) AS is_credit_active,
+      fs.total_route_orders,
+      fs.last_route_order_at
     FROM customers c
     LEFT JOIN locations l ON c.location_id = l.id
     LEFT JOIN regions r ON l.region_id = r.id
     LEFT JOIN sales_reps sr ON c.sales_rep_id = sr.id
+    LEFT JOIN route_customer_financial_summary fs ON fs.customer_id = c.id
     WHERE c.id = $1
     `,
     [id]
@@ -67,6 +75,13 @@ const getAllCustomers = async (req, res) => {
         l.name AS location_name,
         r.name AS region_name,
         sr.name AS sales_rep_name,
+        COALESCE(fs.credit_limit, 0)::numeric(12,2) AS credit_limit,
+        COALESCE(fs.current_balance, 0)::numeric(12,2) AS current_balance,
+        COALESCE(fs.available_credit, 0)::numeric(12,2) AS available_credit,
+        COALESCE(fs.overdue_balance, 0)::numeric(12,2) AS overdue_balance,
+        COALESCE(fs.is_credit_active, TRUE) AS is_credit_active,
+        fs.total_route_orders,
+        fs.last_route_order_at,
         COUNT(DISTINCT o.id) AS orders_count,
         COALESCE(SUM(o.total_amount), 0)::numeric(12,2) AS total_spent,
         COALESCE(SUM(COALESCE(o.amount_paid, 0)), 0)::numeric(12,2) AS total_paid,
@@ -79,6 +94,7 @@ const getAllCustomers = async (req, res) => {
       LEFT JOIN locations l ON c.location_id = l.id
       LEFT JOIN regions r ON l.region_id = r.id
       LEFT JOIN sales_reps sr ON c.sales_rep_id = sr.id
+      LEFT JOIN route_customer_financial_summary fs ON fs.customer_id = c.id
       LEFT JOIN orders o ON o.customer_id = c.id
       WHERE 1=1
     `;
@@ -131,7 +147,7 @@ const getAllCustomers = async (req, res) => {
     }
 
     query += `
-      GROUP BY c.id, l.id, r.id, sr.id
+      GROUP BY c.id, l.id, r.id, sr.id, fs.credit_limit, fs.current_balance, fs.available_credit, fs.overdue_balance, fs.is_credit_active, fs.total_route_orders, fs.last_route_order_at
       ORDER BY c.created_at DESC
     `;
 

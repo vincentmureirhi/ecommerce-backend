@@ -19,11 +19,22 @@ const { broadcastDashboardUpdated } = require('../websocket');
  * Caught in endpoint handlers and mapped to HTTP 422 Unprocessable Entity.
  */
 class OrderValidationError extends Error {
-  constructor(message) {
+  constructor(message, options = {}) {
     super(message);
     this.name = 'OrderValidationError';
     this.isOrderValidationError = true;
+    this.code = options.code || 'ORDER_VALIDATION_ERROR';
+    this.details = options.details || null;
   }
+}
+
+function sendOrderValidationError(res, err) {
+  return res.status(422).json({
+    success: false,
+    error: err.message,
+    code: err.code || 'ORDER_VALIDATION_ERROR',
+    ...(err.details ? { details: err.details } : {}),
+  });
 }
 
 /**
@@ -246,6 +257,189 @@ function deriveRoutePaymentState(totalAmount, amountPaid, dueDate) {
   }
 
   return state;
+}
+
+async function getRouteCreditSnapshot(client, customerId) {
+  const numericCustomerId = Number(customerId);
+  if (!Number.isInteger(numericCustomerId) || numericCustomerId <= 0) {
+    throw new OrderValidationError('Route customer is required for credit validation');
+  }
+
+  await client.query('SELECT pg_advisory_xact_lock($1)', [numericCustomerId]);
+
+  const customerResult = await client.query(
+    `
+    SELECT
+      c.id,
+      c.name,
+      c.customer_type,
+      COALESCE(c.is_active, TRUE) AS customer_is_active,
+      COALESCE(cp.credit_limit, 0)::numeric(12,2) AS credit_limit,
+      COALESCE(cp.is_credit_active, TRUE) AS is_credit_active,
+      COALESCE(cp.credit_notes, '') AS credit_notes
+    FROM customers c
+    LEFT JOIN route_customer_credit_profiles cp ON cp.customer_id = c.id
+    WHERE c.id = $1
+    FOR UPDATE OF c
+    `,
+    [numericCustomerId]
+  );
+
+  const customer = customerResult.rows[0];
+  if (!customer) {
+    throw new OrderValidationError('Route customer does not exist');
+  }
+
+  if (customer.customer_type !== 'route') {
+    throw new OrderValidationError('Credit checks are only available for route customers');
+  }
+
+  if (!customer.customer_is_active) {
+    throw new OrderValidationError('Route customer is inactive');
+  }
+
+  const balanceResult = await client.query(
+    `
+    SELECT COALESCE(SUM(
+      CASE
+        WHEN COALESCE(order_status, '') <> 'cancelled'
+        THEN GREATEST(COALESCE(total_amount, 0) - COALESCE(amount_paid, 0), 0)
+        ELSE 0
+      END
+    ), 0)::numeric(12,2) AS current_balance
+    FROM orders
+    WHERE customer_id = $1
+      AND order_type = 'route'
+    `,
+    [numericCustomerId]
+  );
+
+  const creditLimit = roundMoney(customer.credit_limit);
+  const currentBalance = roundMoney(balanceResult.rows[0]?.current_balance || 0);
+
+  return {
+    customer_id: numericCustomerId,
+    customer_name: customer.name,
+    credit_limit: creditLimit,
+    current_balance: currentBalance,
+    available_credit: roundMoney(Math.max(creditLimit - currentBalance, 0)),
+    is_credit_active: customer.is_credit_active !== false,
+    credit_notes: customer.credit_notes || '',
+  };
+}
+
+async function enforceRouteCreditLimit(client, params) {
+  const {
+    customerId,
+    orderAmount,
+    salesRepId,
+    requestedCreditLimit,
+    creditLimitRequestReason,
+  } = params;
+
+  const orderTotal = roundMoney(orderAmount);
+  const snapshot = await getRouteCreditSnapshot(client, customerId);
+
+  if (!snapshot.is_credit_active) {
+    throw new OrderValidationError('Credit is inactive for this route customer', {
+      code: 'ROUTE_CREDIT_INACTIVE',
+      details: snapshot,
+    });
+  }
+
+  const projectedBalance = roundMoney(snapshot.current_balance + orderTotal);
+
+  if (projectedBalance <= snapshot.credit_limit) {
+    return {
+      ...snapshot,
+      projected_balance: projectedBalance,
+      credit_request_id: null,
+      credit_request_status: null,
+    };
+  }
+
+  const requestedLimit =
+    requestedCreditLimit === undefined || requestedCreditLimit === null || requestedCreditLimit === ''
+      ? NaN
+      : roundMoney(requestedCreditLimit);
+
+  const details = {
+    ...snapshot,
+    order_amount: orderTotal,
+    projected_balance: projectedBalance,
+    shortfall: roundMoney(projectedBalance - snapshot.credit_limit),
+    minimum_required_credit_limit: projectedBalance,
+  };
+
+  if (!Number.isFinite(requestedLimit) || requestedLimit < projectedBalance) {
+    throw new OrderValidationError(
+      `Credit limit exceeded. Available credit is KES ${snapshot.available_credit.toLocaleString()} and this order is KES ${orderTotal.toLocaleString()}.`,
+      {
+        code: 'ROUTE_CREDIT_LIMIT_EXCEEDED',
+        details,
+      }
+    );
+  }
+
+  const requestResult = await client.query(
+    `
+    INSERT INTO route_customer_credit_limit_requests
+      (
+        customer_id,
+        requested_by_sales_rep_id,
+        current_credit_limit,
+        requested_credit_limit,
+        current_balance,
+        order_amount,
+        reason,
+        status,
+        created_at,
+        updated_at
+      )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', NOW(), NOW())
+    RETURNING id
+    `,
+    [
+      snapshot.customer_id,
+      salesRepId || null,
+      snapshot.credit_limit,
+      requestedLimit,
+      snapshot.current_balance,
+      orderTotal,
+      normalizeText(creditLimitRequestReason) || 'Temporary field credit increase requested during route order capture',
+    ]
+  );
+
+  const note = [
+    snapshot.credit_notes,
+    `Pending field credit increase to KES ${requestedLimit.toLocaleString()} for order amount KES ${orderTotal.toLocaleString()}.`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  await client.query(
+    `
+    INSERT INTO route_customer_credit_profiles
+      (customer_id, credit_limit, is_credit_active, credit_notes, created_at, updated_at)
+    VALUES ($1, $2, TRUE, $3, NOW(), NOW())
+    ON CONFLICT (customer_id)
+    DO UPDATE SET
+      credit_limit = GREATEST(route_customer_credit_profiles.credit_limit, EXCLUDED.credit_limit),
+      is_credit_active = TRUE,
+      credit_notes = EXCLUDED.credit_notes,
+      updated_at = NOW()
+    `,
+    [snapshot.customer_id, requestedLimit, note]
+  );
+
+  return {
+    ...snapshot,
+    credit_limit: requestedLimit,
+    available_credit: roundMoney(Math.max(requestedLimit - snapshot.current_balance, 0)),
+    projected_balance: projectedBalance,
+    credit_request_id: requestResult.rows[0].id,
+    credit_request_status: 'pending',
+  };
 }
 
 function enrichOrder(order) {
@@ -890,6 +1084,8 @@ const guestCheckout = async (req, res) => {
       delivery_address,
       route_area,
       route_notes,
+      requested_credit_limit,
+      credit_limit_request_reason,
       sales_rep_id,
       notes,
       items,
@@ -1067,6 +1263,16 @@ const guestCheckout = async (req, res) => {
 
     computedTotalAmount = roundMoney(computedTotalAmount);
     const orderNum = generateOrderNumber();
+    const routeCreditResult =
+      normalizedOrderType === 'route'
+        ? await enforceRouteCreditLimit(client, {
+            customerId,
+            orderAmount: computedTotalAmount,
+            salesRepId: effectiveSalesRepId || null,
+            requestedCreditLimit: requested_credit_limit,
+            creditLimitRequestReason: credit_limit_request_reason,
+          })
+        : null;
     const stockChanges = await reserveStockForOrder(client, preparedItems);
     const finalWorkflowType =
       requestedWorkflowType ||
@@ -1118,6 +1324,18 @@ const guestCheckout = async (req, res) => {
     );
 
     const orderId = orderResult.rows[0].id;
+
+    if (routeCreditResult?.credit_request_id) {
+      await client.query(
+        `
+        UPDATE route_customer_credit_limit_requests
+        SET order_id = $1,
+            updated_at = NOW()
+        WHERE id = $2
+        `,
+        [orderId, routeCreditResult.credit_request_id]
+      );
+    }
 
     for (const item of preparedItems) {
       const itemResult = await client.query(
@@ -1173,6 +1391,7 @@ const guestCheckout = async (req, res) => {
     });
 
     const createdOrder = enrichOrder(orderResult.rows[0]);
+    createdOrder.route_credit = routeCreditResult;
     createdOrder.items = preparedItems.map((item) => ({
       ...item,
       unit_price: item.price_at_purchase,
@@ -1183,7 +1402,7 @@ const guestCheckout = async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK');
     if (err.isOrderValidationError) {
-      return handleError(res, 422, err.message);
+      return sendOrderValidationError(res, err);
     }
     console.error('guestCheckout error:', err.message);
     return handleError(res, 500, 'Failed to place order', err);
@@ -1206,6 +1425,8 @@ const createOrder = async (req, res) => {
       customer_address,
       route_area,
       route_notes,
+      requested_credit_limit,
+      credit_limit_request_reason,
       sales_rep_id,
       order_workflow_type,
       total_amount,
@@ -1448,6 +1669,16 @@ const createOrder = async (req, res) => {
     const finalWorkflowType = requestedWorkflowType || inferredWorkflowType;
 
     const orderNum = generateOrderNumber();
+    const routeCreditResult =
+      normalizedOrderType === 'route'
+        ? await enforceRouteCreditLimit(client, {
+            customerId: resolvedCustomerId,
+            orderAmount: finalTotalAmount,
+            salesRepId: effectiveSalesRepId || null,
+            requestedCreditLimit: requested_credit_limit,
+            creditLimitRequestReason: credit_limit_request_reason,
+          })
+        : null;
     const stockChanges = await reserveStockForOrder(client, preparedItems);
 
     const orderResult = await client.query(
@@ -1492,6 +1723,18 @@ const createOrder = async (req, res) => {
     );
 
     const orderId = orderResult.rows[0].id;
+
+    if (routeCreditResult?.credit_request_id) {
+      await client.query(
+        `
+        UPDATE route_customer_credit_limit_requests
+        SET order_id = $1,
+            updated_at = NOW()
+        WHERE id = $2
+        `,
+        [orderId, routeCreditResult.credit_request_id]
+      );
+    }
 
     for (const item of preparedItems) {
       const itemResult = await client.query(
@@ -1555,6 +1798,7 @@ const createOrder = async (req, res) => {
     });
 
     const createdOrder = enrichOrder(orderResult.rows[0]);
+    createdOrder.route_credit = routeCreditResult;
     createdOrder.items = preparedItems.map((item) => ({
       ...item,
       unit_price: item.price_at_purchase,
@@ -1565,7 +1809,7 @@ const createOrder = async (req, res) => {
   } catch (err) {
     await client.query('ROLLBACK');
     if (err.isOrderValidationError) {
-      return handleError(res, 422, err.message);
+      return sendOrderValidationError(res, err);
     }
     console.error('createOrder error:', err.message);
     return handleError(res, 500, 'Failed to create order', err);

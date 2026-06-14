@@ -1475,6 +1475,189 @@ const saveRouteCustomerAccess = async (req, res) => {
   }
 };
 
+const listCreditLimitRequests = async (req, res) => {
+  try {
+    const status = String(req.query.status || 'pending').trim().toLowerCase();
+    const allowedStatuses = new Set(['pending', 'approved', 'rejected', 'cancelled', 'all']);
+    const safeStatus = allowedStatuses.has(status) ? status : 'pending';
+    const limit = Math.min(Math.max(Number(req.query.limit || 50), 1), 200);
+
+    const params = [];
+    let whereClause = '';
+
+    if (safeStatus !== 'all') {
+      params.push(safeStatus);
+      whereClause = `WHERE r.status = $${params.length}`;
+    }
+
+    params.push(limit);
+
+    const result = await pool.query(
+      `
+      SELECT
+        r.id,
+        r.customer_id,
+        c.name AS customer_name,
+        c.phone AS customer_phone,
+        l.name AS location_name,
+        rg.name AS region_name,
+        r.requested_by_sales_rep_id,
+        COALESCE(sr.name, TRIM(COALESCE(u.first_name, '') || ' ' || COALESCE(u.last_name, ''))) AS sales_rep_name,
+        COALESCE(sr.phone, sr.phone_number, u.phone_number) AS sales_rep_phone,
+        r.order_id,
+        o.order_number,
+        r.current_credit_limit,
+        r.requested_credit_limit,
+        r.current_balance,
+        r.order_amount,
+        r.reason,
+        r.status,
+        r.reviewed_by_user_id,
+        r.reviewed_at,
+        r.decision_notes,
+        r.created_at,
+        r.updated_at
+      FROM route_customer_credit_limit_requests r
+      INNER JOIN customers c ON c.id = r.customer_id
+      LEFT JOIN locations l ON l.id = c.location_id
+      LEFT JOIN regions rg ON rg.id = l.region_id
+      LEFT JOIN sales_reps sr ON sr.id = r.requested_by_sales_rep_id
+      LEFT JOIN users u ON u.id = r.requested_by_sales_rep_id
+      LEFT JOIN orders o ON o.id = r.order_id
+      ${whereClause}
+      ORDER BY
+        CASE WHEN r.status = 'pending' THEN 0 ELSE 1 END,
+        r.created_at DESC
+      LIMIT $${params.length}
+      `,
+      params
+    );
+
+    return success(res, 200, 'Credit limit requests retrieved successfully', {
+      requests: result.rows,
+      total: result.rows.length,
+    });
+  } catch (err) {
+    console.error('❌ listCreditLimitRequests error:', err.message);
+    return fail(res, 500, 'Failed to list credit limit requests', { error: err.message });
+  }
+};
+
+const reviewCreditLimitRequest = async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const requestId = Number(req.params.requestId);
+    const decision = String(req.body.status || req.body.decision || '').trim().toLowerCase();
+    const decisionNotes = req.body.decision_notes ? String(req.body.decision_notes).trim() : null;
+
+    if (!Number.isInteger(requestId) || requestId <= 0) {
+      await client.query('ROLLBACK');
+      return fail(res, 400, 'Invalid credit limit request id');
+    }
+
+    if (!['approved', 'rejected', 'cancelled'].includes(decision)) {
+      await client.query('ROLLBACK');
+      return fail(res, 400, 'Decision must be approved, rejected, or cancelled');
+    }
+
+    const requestResult = await client.query(
+      `
+      SELECT *
+      FROM route_customer_credit_limit_requests
+      WHERE id = $1
+      FOR UPDATE
+      `,
+      [requestId]
+    );
+
+    const requestRow = requestResult.rows[0] || null;
+    if (!requestRow) {
+      await client.query('ROLLBACK');
+      return fail(res, 404, 'Credit limit request not found');
+    }
+
+    if (requestRow.status !== 'pending') {
+      await client.query('ROLLBACK');
+      return fail(res, 409, `Credit limit request is already ${requestRow.status}`);
+    }
+
+    const nextCreditLimit =
+      decision === 'approved'
+        ? Number(requestRow.requested_credit_limit)
+        : Number(requestRow.current_credit_limit);
+
+    await client.query(
+      `
+      INSERT INTO route_customer_credit_profiles
+      (
+        customer_id,
+        credit_limit,
+        is_credit_active,
+        credit_notes,
+        updated_by_user_id,
+        created_by_user_id,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, TRUE, $3, $4, $4, NOW(), NOW())
+      ON CONFLICT (customer_id)
+      DO UPDATE SET
+        credit_limit = EXCLUDED.credit_limit,
+        is_credit_active = TRUE,
+        credit_notes = NULLIF(
+          CONCAT_WS(
+            E'\\n',
+            NULLIF(route_customer_credit_profiles.credit_notes, ''),
+            EXCLUDED.credit_notes
+          ),
+          ''
+        ),
+        updated_by_user_id = EXCLUDED.updated_by_user_id,
+        updated_at = NOW()
+      `,
+      [
+        requestRow.customer_id,
+        nextCreditLimit,
+        decision === 'approved'
+          ? `Approved temporary increase request #${requestId} to KES ${nextCreditLimit}. ${decisionNotes || ''}`.trim()
+          : `Rejected temporary increase request #${requestId}; restored limit to KES ${nextCreditLimit}. ${decisionNotes || ''}`.trim(),
+        req.user?.id || null,
+      ]
+    );
+
+    const updatedRequest = await client.query(
+      `
+      UPDATE route_customer_credit_limit_requests
+      SET
+        status = $1,
+        reviewed_by_user_id = $2,
+        reviewed_at = NOW(),
+        decision_notes = $3,
+        updated_at = NOW()
+      WHERE id = $4
+      RETURNING *
+      `,
+      [decision, req.user?.id || null, decisionNotes, requestId]
+    );
+
+    await client.query('COMMIT');
+
+    return success(res, 200, 'Credit limit request reviewed successfully', {
+      request: updatedRequest.rows[0],
+      applied_credit_limit: nextCreditLimit,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('❌ reviewCreditLimitRequest error:', err.message);
+    return fail(res, 500, 'Failed to review credit limit request', { error: err.message });
+  } finally {
+    client.release();
+  }
+};
+
 const loginRouteCustomer = async (req, res) => {
   const client = await pool.connect();
 
@@ -1828,6 +2011,8 @@ module.exports = {
   listRouteCustomers,
   createAccountForExistingCustomer,
   saveRouteCustomerAccess,
+  listCreditLimitRequests,
+  reviewCreditLimitRequest,
   loginRouteCustomer,
   changeRouteCustomerPassword,
   getRouteCustomerDashboard,
