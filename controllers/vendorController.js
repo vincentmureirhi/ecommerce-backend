@@ -1,6 +1,7 @@
 'use strict';
 
 const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 const pool = require('../config/database');
 const { handleError, handleSuccess } = require('../utils/errorHandler');
 
@@ -9,6 +10,7 @@ const APPLICATION_STATUSES = ['submitted', 'under_review', 'approved', 'rejected
 const VENDOR_STATUSES = ['pending', 'active', 'suspended', 'closed'];
 const VERIFICATION_STATUSES = ['unverified', 'pending', 'verified', 'rejected'];
 const FULFILLMENT_MODELS = ['xpose_reviewed', 'xpose_fulfilled', 'vendor_fulfilled', 'hybrid'];
+const PRODUCT_SUBMISSION_STATUSES = ['draft', 'submitted', 'changes_requested', 'approved', 'rejected', 'archived'];
 
 function trimOrNull(value) {
   if (typeof value !== 'string') return null;
@@ -99,8 +101,109 @@ function generateTemporaryPassword() {
   return output;
 }
 
+function getJwtSecret() {
+  const secret = process.env.JWT_SECRET;
+  return typeof secret === 'string' && secret.trim() ? secret : null;
+}
+
 function getActorId(req) {
   return req.user?.id || req.user?.user_id || req.user?.admin_id || null;
+}
+
+function normalizeOptionalUrl(value) {
+  const text = trimOrNull(value);
+  if (!text) return null;
+  if (/^https?:\/\//i.test(text)) return text;
+  return `https://${text}`;
+}
+
+function normalizeTags(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+      .slice(0, 20);
+  }
+
+  const text = trimOrNull(value);
+  if (!text) return [];
+
+  return text
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 20);
+}
+
+function requirePositiveMoney(value, field) {
+  const parsed = parseNumber(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${field} must be greater than 0`);
+  }
+  return parsed;
+}
+
+function requireNonNegativeMoney(value, field, fallback = null) {
+  const parsed = parseNumber(value, fallback);
+  if (parsed === null) return null;
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${field} must be 0 or greater`);
+  }
+  return parsed;
+}
+
+function requirePositiveInteger(value, field, fallback = 1) {
+  const parsed = parseInteger(value, fallback);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`${field} must be an integer greater than 0`);
+  }
+  return parsed;
+}
+
+function requireNonNegativeInteger(value, field, fallback = 0) {
+  const parsed = parseInteger(value, fallback);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${field} must be an integer 0 or greater`);
+  }
+  return parsed;
+}
+
+function mapVendorUser(row) {
+  if (!row) return null;
+  return {
+    id: row.id || row.vendor_user_id,
+    vendor_id: row.vendor_id,
+    full_name: row.full_name,
+    email: row.email,
+    phone: row.phone,
+    username: row.username,
+    role: row.role,
+    status: row.status || row.user_status,
+    must_change_password: Boolean(row.must_change_password),
+    last_login_at: row.last_login_at,
+    created_at: row.created_at,
+  };
+}
+
+function mapPublicVendor(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    store_name: row.store_name,
+    store_slug: row.store_slug,
+    public_description: row.public_description,
+    product_categories: row.product_categories || [],
+    logo_url: row.logo_url,
+    banner_url: row.banner_url,
+    verification_status: row.verification_status,
+    verified: row.verification_status === 'verified',
+    verification_badge_label: row.verification_badge_label || 'Verified by XPOSE',
+    product_count: Number(row.product_count || 0),
+    limited_stock_count: Number(row.limited_stock_count || 0),
+    minimum_price: row.minimum_price,
+    storefront_featured: Boolean(row.storefront_featured),
+    published_at: row.published_at,
+  };
 }
 
 async function createUniqueSlug(client, storeName) {
@@ -223,6 +326,272 @@ const listPublicVendorPlans = async (req, res) => {
     return handleSuccess(res, 200, 'Vendor plans retrieved', result.rows);
   } catch (err) {
     return handleError(res, 500, 'Failed to retrieve vendor plans', err);
+  }
+};
+
+const listPublicVendorStores = async (req, res) => {
+  try {
+    const { search, category, featured } = req.query;
+    const params = [];
+    const where = [
+      "v.status = 'active'",
+      "v.verification_status = 'verified'",
+      "v.store_visibility_status = 'public'",
+    ];
+
+    if (search) {
+      params.push(`%${String(search).trim()}%`);
+      where.push(`(
+        v.store_name ILIKE $${params.length}
+        OR COALESCE(v.public_description, '') ILIKE $${params.length}
+        OR COALESCE(v.legal_name, '') ILIKE $${params.length}
+      )`);
+    }
+
+    if (category) {
+      params.push(String(category).trim().toLowerCase());
+      where.push(`EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements_text(COALESCE(v.product_categories, '[]'::jsonb)) item
+        WHERE LOWER(item) = $${params.length}
+      )`);
+    }
+
+    if (featured === '1' || featured === 'true') {
+      where.push('v.storefront_featured = TRUE');
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        v.id,
+        v.store_name,
+        v.store_slug,
+        v.public_description,
+        v.product_categories,
+        v.logo_url,
+        v.banner_url,
+        v.verification_status,
+        v.verification_badge_label,
+        v.storefront_featured,
+        v.published_at,
+        COALESCE(product_stats.product_count, 0)::int AS product_count,
+        COALESCE(product_stats.limited_stock_count, 0)::int AS limited_stock_count,
+        product_stats.minimum_price
+      FROM vendors v
+      LEFT JOIN LATERAL (
+        SELECT
+          COUNT(*) AS product_count,
+          COUNT(*) FILTER (
+            WHERE COALESCE(NULLIF(p.stock_status_override, ''), CASE
+              WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
+              WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, 10), 10) THEN 'limited_stock'
+              ELSE 'in_stock'
+            END) = 'limited_stock'
+          ) AS limited_stock_count,
+          MIN(COALESCE(p.retail_price, p.wholesale_price, 0)) AS minimum_price
+        FROM products p
+        WHERE p.vendor_id = v.id
+          AND p.product_owner_type = 'vendor'
+          AND p.vendor_approval_status = 'approved'
+          AND COALESCE(p.is_active, TRUE) = TRUE
+      ) product_stats ON TRUE
+      WHERE ${where.join(' AND ')}
+      ORDER BY v.storefront_featured DESC, product_stats.product_count DESC NULLS LAST, v.created_at DESC
+      LIMIT 100
+      `,
+      params
+    );
+
+    return handleSuccess(res, 200, 'Public vendor stores retrieved', result.rows.map(mapPublicVendor));
+  } catch (err) {
+    return handleError(res, 500, 'Failed to retrieve public vendor stores', err);
+  }
+};
+
+const getPublicVendorStoreBySlug = async (req, res) => {
+  try {
+    const vendorResult = await pool.query(
+      `
+      SELECT
+        v.id,
+        v.store_name,
+        v.store_slug,
+        v.public_description,
+        v.product_categories,
+        v.logo_url,
+        v.banner_url,
+        v.verification_status,
+        v.verification_badge_label,
+        v.storefront_featured,
+        v.published_at,
+        COALESCE(product_stats.product_count, 0)::int AS product_count,
+        COALESCE(product_stats.limited_stock_count, 0)::int AS limited_stock_count,
+        product_stats.minimum_price
+      FROM vendors v
+      LEFT JOIN LATERAL (
+        SELECT
+          COUNT(*) AS product_count,
+          COUNT(*) FILTER (
+            WHERE COALESCE(NULLIF(p.stock_status_override, ''), CASE
+              WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
+              WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, 10), 10) THEN 'limited_stock'
+              ELSE 'in_stock'
+            END) = 'limited_stock'
+          ) AS limited_stock_count,
+          MIN(COALESCE(p.retail_price, p.wholesale_price, 0)) AS minimum_price
+        FROM products p
+        WHERE p.vendor_id = v.id
+          AND p.product_owner_type = 'vendor'
+          AND p.vendor_approval_status = 'approved'
+          AND COALESCE(p.is_active, TRUE) = TRUE
+      ) product_stats ON TRUE
+      WHERE v.store_slug = $1
+        AND v.status = 'active'
+        AND v.verification_status = 'verified'
+        AND v.store_visibility_status = 'public'
+      LIMIT 1
+      `,
+      [req.params.slug]
+    );
+
+    if (vendorResult.rows.length === 0) {
+      return handleError(res, 404, 'Vendor store not found');
+    }
+
+    const productsResult = await pool.query(
+      `
+      SELECT
+        p.id,
+        p.name,
+        p.description,
+        p.sku,
+        p.category_id,
+        c.name AS category_name,
+        p.image_url,
+        p.retail_price,
+        p.wholesale_price,
+        p.min_order_qty,
+        p.order_qty_step,
+        p.selling_unit_label,
+        p.current_stock,
+        COALESCE(NULLIF(p.stock_status_override, ''), CASE
+          WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
+          WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, 10), 10) THEN 'limited_stock'
+          ELSE 'in_stock'
+        END) AS stock_status,
+        v.store_name AS vendor_store_name,
+        v.store_slug AS vendor_store_slug,
+        v.verification_status AS vendor_verification_status,
+        v.verification_badge_label AS vendor_verification_badge_label
+      FROM products p
+      JOIN vendors v ON v.id = p.vendor_id
+      LEFT JOIN categories c ON c.id = p.category_id
+      WHERE p.vendor_id = $1
+        AND p.product_owner_type = 'vendor'
+        AND p.vendor_approval_status = 'approved'
+        AND COALESCE(p.is_active, TRUE) = TRUE
+      ORDER BY p.current_stock DESC, p.id DESC
+      LIMIT 120
+      `,
+      [vendorResult.rows[0].id]
+    );
+
+    return handleSuccess(res, 200, 'Public vendor store retrieved', {
+      store: mapPublicVendor(vendorResult.rows[0]),
+      products: productsResult.rows,
+    });
+  } catch (err) {
+    return handleError(res, 500, 'Failed to retrieve public vendor store', err);
+  }
+};
+
+const loginVendor = async (req, res) => {
+  try {
+    const identifier = trimOrNull(req.body?.identifier || req.body?.username || req.body?.email || req.body?.phone);
+    const password = String(req.body?.password || '');
+
+    if (!identifier || !password) {
+      return handleError(res, 400, 'Vendor username/email/phone and password are required');
+    }
+
+    const phoneDigits = normalizePhoneDigits(identifier) || null;
+    const result = await pool.query(
+      `
+      SELECT
+        vu.*,
+        v.store_name,
+        v.store_slug,
+        v.status AS vendor_status,
+        v.verification_status,
+        v.store_visibility_status,
+        v.logo_url,
+        v.banner_url
+      FROM vendor_users vu
+      JOIN vendors v ON v.id = vu.vendor_id
+      WHERE LOWER(vu.username) = LOWER($1)
+         OR LOWER(COALESCE(vu.email, '')) = LOWER($1)
+         OR REGEXP_REPLACE(COALESCE(vu.phone, ''), '\\D', '', 'g') = $2
+      ORDER BY vu.created_at ASC
+      LIMIT 1
+      `,
+      [identifier, phoneDigits]
+    );
+
+    if (result.rows.length === 0) {
+      return handleError(res, 401, 'Invalid vendor login credentials');
+    }
+
+    const account = result.rows[0];
+    const validPassword = await bcrypt.compare(password, account.password_hash);
+    if (!validPassword) {
+      return handleError(res, 401, 'Invalid vendor login credentials');
+    }
+
+    if (account.status !== 'active') {
+      return handleError(res, 403, 'Vendor user account is not active');
+    }
+
+    if (account.vendor_status !== 'active') {
+      return handleError(res, 403, 'Vendor store is not active');
+    }
+
+    const jwtSecret = getJwtSecret();
+    if (!jwtSecret) {
+      return handleError(res, 500, 'JWT secret is not configured');
+    }
+
+    const token = jwt.sign(
+      {
+        token_type: 'vendor_user',
+        vendor_user_id: account.id,
+        vendor_id: account.vendor_id,
+        username: account.username,
+        role: account.role,
+      },
+      jwtSecret,
+      { expiresIn: process.env.VENDOR_JWT_EXPIRES_IN || '12h' }
+    );
+
+    await pool.query('UPDATE vendor_users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1', [account.id]);
+
+    return handleSuccess(res, 200, 'Vendor login successful', {
+      token,
+      vendor_user: mapVendorUser(account),
+      vendor: {
+        id: account.vendor_id,
+        store_name: account.store_name,
+        store_slug: account.store_slug,
+        status: account.vendor_status,
+        verification_status: account.verification_status,
+        store_visibility_status: account.store_visibility_status,
+        logo_url: account.logo_url,
+        banner_url: account.banner_url,
+      },
+      must_change_password: Boolean(account.must_change_password),
+    });
+  } catch (err) {
+    return handleError(res, 500, 'Vendor login failed', err);
   }
 };
 
@@ -963,6 +1332,530 @@ const updateVendor = async (req, res) => {
   }
 };
 
+const getVendorMe = async (req, res) => {
+  try {
+    const vendorId = req.vendorUser.vendor_id;
+    const [vendorResult, subscriptionResult, statsResult] = await Promise.all([
+      pool.query(
+        `
+        SELECT
+          v.*,
+          p.name AS plan_name,
+          p.code AS plan_code
+        FROM vendors v
+        LEFT JOIN vendor_subscription_plans p ON p.id = v.subscription_plan_id
+        WHERE v.id = $1
+        LIMIT 1
+        `,
+        [vendorId]
+      ),
+      pool.query(
+        `
+        SELECT s.*, p.name AS plan_name, p.code AS plan_code
+        FROM vendor_subscriptions s
+        LEFT JOIN vendor_subscription_plans p ON p.id = s.plan_id
+        WHERE s.vendor_id = $1
+        ORDER BY s.created_at DESC
+        LIMIT 1
+        `,
+        [vendorId]
+      ),
+      pool.query(
+        `
+        SELECT
+          COUNT(*) FILTER (WHERE p.vendor_approval_status = 'approved')::int AS approved_products,
+          COUNT(*) FILTER (WHERE p.vendor_approval_status = 'approved' AND COALESCE(p.is_active, TRUE) = TRUE)::int AS live_products,
+          COALESCE((
+            SELECT COUNT(*)
+            FROM vendor_product_submissions ps
+            WHERE ps.vendor_id = $1
+              AND ps.submission_status IN ('submitted', 'changes_requested')
+          ), 0)::int AS pending_submissions
+        FROM products p
+        WHERE p.vendor_id = $1
+        `,
+        [vendorId]
+      ),
+    ]);
+
+    return handleSuccess(res, 200, 'Vendor workspace retrieved', {
+      vendor_user: req.vendorUser,
+      vendor: vendorResult.rows[0] || req.vendor,
+      subscription: subscriptionResult.rows[0] || null,
+      stats: statsResult.rows[0] || { approved_products: 0, live_products: 0, pending_submissions: 0 },
+    });
+  } catch (err) {
+    return handleError(res, 500, 'Failed to retrieve vendor workspace', err);
+  }
+};
+
+const changeVendorPassword = async (req, res) => {
+  try {
+    const currentPassword = String(req.body?.current_password || '');
+    const newPassword = String(req.body?.new_password || '');
+
+    if (!currentPassword || !newPassword) {
+      return handleError(res, 400, 'current_password and new_password are required');
+    }
+
+    if (newPassword.length < 10) {
+      return handleError(res, 400, 'New password must be at least 10 characters');
+    }
+
+    const userResult = await pool.query(
+      'SELECT id, password_hash FROM vendor_users WHERE id = $1 AND vendor_id = $2 LIMIT 1',
+      [req.vendorUser.id, req.vendorUser.vendor_id]
+    );
+
+    if (userResult.rows.length === 0) {
+      return handleError(res, 404, 'Vendor user not found');
+    }
+
+    const valid = await bcrypt.compare(currentPassword, userResult.rows[0].password_hash);
+    if (!valid) {
+      return handleError(res, 401, 'Current password is incorrect');
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    await pool.query(
+      `
+      UPDATE vendor_users
+      SET password_hash = $1,
+          must_change_password = FALSE,
+          password_changed_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $2
+      `,
+      [passwordHash, req.vendorUser.id]
+    );
+
+    await pool.query(
+      `
+      INSERT INTO vendor_audit_logs (vendor_id, actor_type, actor_id, action, details)
+      VALUES ($1, 'vendor', $2, 'vendor_password_changed', '{}'::jsonb)
+      `,
+      [req.vendorUser.vendor_id, req.vendorUser.id]
+    );
+
+    return handleSuccess(res, 200, 'Vendor password updated');
+  } catch (err) {
+    return handleError(res, 500, 'Failed to update vendor password', err);
+  }
+};
+
+const updateMyVendorProfile = async (req, res) => {
+  try {
+    const body = req.body || {};
+    const updates = [];
+    const params = [];
+
+    function addUpdate(column, value) {
+      if (value === undefined) return;
+      params.push(value);
+      updates.push(`${column} = $${params.length}`);
+    }
+
+    if (body.public_description !== undefined) addUpdate('public_description', trimOrNull(body.public_description));
+    if (body.support_phone !== undefined) addUpdate('support_phone', trimOrNull(body.support_phone));
+    if (body.support_email !== undefined) addUpdate('support_email', normalizeEmail(body.support_email));
+    if (body.website_url !== undefined) addUpdate('website_url', normalizeOptionalUrl(body.website_url));
+    if (body.logo_url !== undefined) addUpdate('logo_url', trimOrNull(body.logo_url));
+    if (body.banner_url !== undefined) addUpdate('banner_url', trimOrNull(body.banner_url));
+    if (body.payout_phone !== undefined) addUpdate('payout_phone', trimOrNull(body.payout_phone));
+    if (body.payout_name !== undefined) addUpdate('payout_name', trimOrNull(body.payout_name));
+    if (body.payout_notes !== undefined) addUpdate('payout_notes', trimOrNull(body.payout_notes));
+
+    if (body.store_visibility_status !== undefined) {
+      const visibility = String(body.store_visibility_status || '').trim().toLowerCase();
+      if (!['public', 'hidden'].includes(visibility)) {
+        return handleError(res, 400, 'store_visibility_status must be public or hidden');
+      }
+      if (visibility === 'public' && req.vendor.verification_status !== 'verified') {
+        return handleError(res, 400, 'Only verified vendors can publish a public store');
+      }
+      addUpdate('store_visibility_status', visibility);
+      if (visibility === 'public') addUpdate('published_at', new Date());
+    }
+
+    if (updates.length === 0) {
+      return handleError(res, 400, 'No valid profile fields were provided');
+    }
+
+    params.push(req.vendorUser.vendor_id);
+    const result = await pool.query(
+      `
+      UPDATE vendors
+      SET ${updates.join(', ')}, updated_at = NOW()
+      WHERE id = $${params.length}
+      RETURNING *
+      `,
+      params
+    );
+
+    await pool.query(
+      `
+      INSERT INTO vendor_audit_logs (vendor_id, actor_type, actor_id, action, details)
+      VALUES ($1, 'vendor', $2, 'vendor_profile_updated', $3::jsonb)
+      `,
+      [req.vendorUser.vendor_id, req.vendorUser.id, JSON.stringify({ fields: Object.keys(body) })]
+    );
+
+    return handleSuccess(res, 200, 'Vendor profile updated', result.rows[0]);
+  } catch (err) {
+    return handleError(res, 500, 'Failed to update vendor profile', err);
+  }
+};
+
+function readProductSubmissionPayload(body = {}, existing = {}) {
+  const productName = trimOrNull(body.product_name ?? body.name ?? existing.product_name);
+  if (!productName) throw new Error('product_name is required');
+
+  const categoryId = parseInteger(body.category_id ?? existing.category_id);
+  if (!Number.isInteger(categoryId) || categoryId <= 0) {
+    throw new Error('category_id is required');
+  }
+
+  const retailPrice = requirePositiveMoney(body.proposed_retail_price ?? body.retail_price ?? existing.proposed_retail_price, 'proposed_retail_price');
+  const wholesalePrice = requireNonNegativeMoney(
+    body.proposed_wholesale_price ?? body.wholesale_price ?? existing.proposed_wholesale_price,
+    'proposed_wholesale_price',
+    null
+  );
+  const costPrice = requireNonNegativeMoney(
+    body.proposed_cost_price ?? body.cost_price ?? existing.proposed_cost_price,
+    'proposed_cost_price',
+    null
+  );
+
+  return {
+    product_name: productName,
+    sku: trimOrNull(body.sku ?? existing.sku),
+    brand_name: trimOrNull(body.brand_name ?? existing.brand_name),
+    category_id: categoryId,
+    description: trimOrNull(body.description ?? existing.description),
+    image_url: trimOrNull(body.image_url ?? existing.image_url),
+    proposed_retail_price: retailPrice,
+    proposed_wholesale_price: wholesalePrice,
+    proposed_cost_price: costPrice,
+    min_order_qty: requirePositiveInteger(body.min_order_qty ?? existing.min_order_qty, 'min_order_qty', 1),
+    order_qty_step: requirePositiveInteger(body.order_qty_step ?? existing.order_qty_step, 'order_qty_step', 1),
+    current_stock: requireNonNegativeInteger(body.current_stock ?? existing.current_stock, 'current_stock', 0),
+    selling_unit_label: trimOrNull(body.selling_unit_label ?? existing.selling_unit_label) || 'piece',
+    fulfillment_model: normalizeFulfillmentModel(body.fulfillment_model ?? existing.fulfillment_model, 'xpose_reviewed'),
+    product_tags: normalizeTags(body.product_tags ?? existing.product_tags),
+    is_featured_requested: normalizeBoolean(body.is_featured_requested ?? existing.is_featured_requested, false),
+    vendor_notes: trimOrNull(body.vendor_notes ?? existing.vendor_notes),
+  };
+}
+
+async function assertVendorCanSubmitProduct(vendorId) {
+  const result = await pool.query(
+    `
+    SELECT
+      v.max_products,
+      COUNT(p.id) FILTER (WHERE p.vendor_approval_status = 'approved')::int AS approved_products
+    FROM vendors v
+    LEFT JOIN products p ON p.vendor_id = v.id AND p.product_owner_type = 'vendor'
+    WHERE v.id = $1
+    GROUP BY v.id
+    `,
+    [vendorId]
+  );
+
+  const row = result.rows[0];
+  if (!row) throw new Error('Vendor store not found');
+  if (Number(row.max_products) > 0 && Number(row.approved_products) >= Number(row.max_products)) {
+    throw new Error('Vendor product limit reached. Contact XPOSE to upgrade the store plan.');
+  }
+}
+
+const listMyVendorProductSubmissions = async (req, res) => {
+  try {
+    const { status } = req.query;
+    const params = [req.vendorUser.vendor_id];
+    const where = ['ps.vendor_id = $1'];
+
+    if (status && PRODUCT_SUBMISSION_STATUSES.includes(status)) {
+      params.push(status);
+      where.push(`ps.submission_status = $${params.length}`);
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        ps.*,
+        c.name AS category_name,
+        p.id AS live_product_id,
+        p.name AS live_product_name,
+        p.vendor_approval_status AS live_product_status
+      FROM vendor_product_submissions ps
+      LEFT JOIN categories c ON c.id = ps.category_id
+      LEFT JOIN products p ON p.id = ps.product_id
+      WHERE ${where.join(' AND ')}
+      ORDER BY ps.created_at DESC
+      LIMIT 200
+      `,
+      params
+    );
+
+    return handleSuccess(res, 200, 'Vendor product submissions retrieved', result.rows);
+  } catch (err) {
+    return handleError(res, 500, 'Failed to retrieve vendor product submissions', err);
+  }
+};
+
+const createMyVendorProductSubmission = async (req, res) => {
+  try {
+    await assertVendorCanSubmitProduct(req.vendorUser.vendor_id);
+    const payload = readProductSubmissionPayload(req.body);
+    const shouldSubmit = req.body?.submit === true || req.body?.submission_status === 'submitted';
+
+    const result = await pool.query(
+      `
+      INSERT INTO vendor_product_submissions
+        (
+          vendor_id,
+          submission_status,
+          product_name,
+          sku,
+          brand_name,
+          category_id,
+          description,
+          image_url,
+          proposed_retail_price,
+          proposed_wholesale_price,
+          proposed_cost_price,
+          min_order_qty,
+          order_qty_step,
+          current_stock,
+          selling_unit_label,
+          fulfillment_model,
+          commission_rate,
+          minimum_margin_percent,
+          price_review_required,
+          product_tags,
+          is_featured_requested,
+          vendor_notes,
+          submitted_at
+        )
+      SELECT
+        v.id,
+        $2,
+        $3,
+        $4,
+        $5,
+        $6,
+        $7,
+        $8,
+        $9,
+        $10,
+        $11,
+        $12,
+        $13,
+        $14,
+        $15,
+        $16,
+        v.commission_rate,
+        v.minimum_margin_percent,
+        v.price_review_required,
+        $17::jsonb,
+        $18,
+        $19,
+        CASE WHEN $2 = 'submitted' THEN NOW() ELSE NULL END
+      FROM vendors v
+      WHERE v.id = $1
+      RETURNING *
+      `,
+      [
+        req.vendorUser.vendor_id,
+        shouldSubmit ? 'submitted' : 'draft',
+        payload.product_name,
+        payload.sku,
+        payload.brand_name,
+        payload.category_id,
+        payload.description,
+        payload.image_url,
+        payload.proposed_retail_price,
+        payload.proposed_wholesale_price,
+        payload.proposed_cost_price,
+        payload.min_order_qty,
+        payload.order_qty_step,
+        payload.current_stock,
+        payload.selling_unit_label,
+        payload.fulfillment_model,
+        JSON.stringify(payload.product_tags),
+        payload.is_featured_requested,
+        payload.vendor_notes,
+      ]
+    );
+
+    if (shouldSubmit) {
+      await pool.query('UPDATE vendors SET last_product_submission_at = NOW(), updated_at = NOW() WHERE id = $1', [
+        req.vendorUser.vendor_id,
+      ]);
+    }
+
+    await pool.query(
+      `
+      INSERT INTO vendor_audit_logs (vendor_id, actor_type, actor_id, action, details)
+      VALUES ($1, 'vendor', $2, $3, $4::jsonb)
+      `,
+      [
+        req.vendorUser.vendor_id,
+        req.vendorUser.id,
+        shouldSubmit ? 'vendor_product_submitted' : 'vendor_product_draft_created',
+        JSON.stringify({ submission_id: result.rows[0].id }),
+      ]
+    );
+
+    return handleSuccess(res, 201, shouldSubmit ? 'Product submitted for XPOSE review' : 'Product draft created', result.rows[0]);
+  } catch (err) {
+    return handleError(res, 400, err.message || 'Failed to create vendor product submission', err);
+  }
+};
+
+const updateMyVendorProductSubmission = async (req, res) => {
+  try {
+    const existingResult = await pool.query(
+      `
+      SELECT *
+      FROM vendor_product_submissions
+      WHERE id = $1
+        AND vendor_id = $2
+      LIMIT 1
+      `,
+      [req.params.id, req.vendorUser.vendor_id]
+    );
+
+    if (existingResult.rows.length === 0) {
+      return handleError(res, 404, 'Vendor product submission not found');
+    }
+
+    const existing = existingResult.rows[0];
+    if (!['draft', 'changes_requested'].includes(existing.submission_status)) {
+      return handleError(res, 400, 'Only draft or changes-requested submissions can be edited');
+    }
+
+    await assertVendorCanSubmitProduct(req.vendorUser.vendor_id);
+    const payload = readProductSubmissionPayload(req.body, existing);
+    const shouldSubmit = req.body?.submit === true || req.body?.submission_status === 'submitted';
+
+    const result = await pool.query(
+      `
+      UPDATE vendor_product_submissions
+      SET
+        submission_status = $1,
+        product_name = $2,
+        sku = $3,
+        brand_name = $4,
+        category_id = $5,
+        description = $6,
+        image_url = $7,
+        proposed_retail_price = $8,
+        proposed_wholesale_price = $9,
+        proposed_cost_price = $10,
+        min_order_qty = $11,
+        order_qty_step = $12,
+        current_stock = $13,
+        selling_unit_label = $14,
+        fulfillment_model = $15,
+        product_tags = $16::jsonb,
+        is_featured_requested = $17,
+        vendor_notes = $18,
+        submitted_at = CASE WHEN $1 = 'submitted' THEN COALESCE(submitted_at, NOW()) ELSE submitted_at END,
+        updated_at = NOW()
+      WHERE id = $19
+        AND vendor_id = $20
+      RETURNING *
+      `,
+      [
+        shouldSubmit ? 'submitted' : existing.submission_status,
+        payload.product_name,
+        payload.sku,
+        payload.brand_name,
+        payload.category_id,
+        payload.description,
+        payload.image_url,
+        payload.proposed_retail_price,
+        payload.proposed_wholesale_price,
+        payload.proposed_cost_price,
+        payload.min_order_qty,
+        payload.order_qty_step,
+        payload.current_stock,
+        payload.selling_unit_label,
+        payload.fulfillment_model,
+        JSON.stringify(payload.product_tags),
+        payload.is_featured_requested,
+        payload.vendor_notes,
+        req.params.id,
+        req.vendorUser.vendor_id,
+      ]
+    );
+
+    if (shouldSubmit) {
+      await pool.query('UPDATE vendors SET last_product_submission_at = NOW(), updated_at = NOW() WHERE id = $1', [
+        req.vendorUser.vendor_id,
+      ]);
+    }
+
+    await pool.query(
+      `
+      INSERT INTO vendor_audit_logs (vendor_id, actor_type, actor_id, action, details)
+      VALUES ($1, 'vendor', $2, $3, $4::jsonb)
+      `,
+      [
+        req.vendorUser.vendor_id,
+        req.vendorUser.id,
+        shouldSubmit ? 'vendor_product_submitted' : 'vendor_product_draft_updated',
+        JSON.stringify({ submission_id: result.rows[0].id }),
+      ]
+    );
+
+    return handleSuccess(res, 200, shouldSubmit ? 'Product submitted for XPOSE review' : 'Product submission updated', result.rows[0]);
+  } catch (err) {
+    return handleError(res, 400, err.message || 'Failed to update vendor product submission', err);
+  }
+};
+
+const submitMyVendorProductSubmission = async (req, res) => {
+  try {
+    await assertVendorCanSubmitProduct(req.vendorUser.vendor_id);
+    const result = await pool.query(
+      `
+      UPDATE vendor_product_submissions
+      SET submission_status = 'submitted',
+          submitted_at = COALESCE(submitted_at, NOW()),
+          updated_at = NOW()
+      WHERE id = $1
+        AND vendor_id = $2
+        AND submission_status IN ('draft', 'changes_requested')
+      RETURNING *
+      `,
+      [req.params.id, req.vendorUser.vendor_id]
+    );
+
+    if (result.rows.length === 0) {
+      return handleError(res, 404, 'Vendor product submission not found or cannot be submitted');
+    }
+
+    await pool.query('UPDATE vendors SET last_product_submission_at = NOW(), updated_at = NOW() WHERE id = $1', [
+      req.vendorUser.vendor_id,
+    ]);
+
+    await pool.query(
+      `
+      INSERT INTO vendor_audit_logs (vendor_id, actor_type, actor_id, action, details)
+      VALUES ($1, 'vendor', $2, 'vendor_product_submitted', $3::jsonb)
+      `,
+      [req.vendorUser.vendor_id, req.vendorUser.id, JSON.stringify({ submission_id: result.rows[0].id })]
+    );
+
+    return handleSuccess(res, 200, 'Product submitted for XPOSE review', result.rows[0]);
+  } catch (err) {
+    return handleError(res, 400, err.message || 'Failed to submit vendor product', err);
+  }
+};
+
 const listVendorPlans = async (req, res) => {
   try {
     const result = await pool.query(
@@ -1059,8 +1952,420 @@ const updateVendorPlan = async (req, res) => {
   }
 };
 
+async function createUniqueProductSku(client, vendorId, submissionId, rawSku, productName) {
+  const base = trimOrNull(rawSku) || `V${vendorId}-${submissionId}-${slugify(productName).slice(0, 18)}`;
+  let sku = base.toUpperCase();
+  let suffix = 2;
+
+  while (suffix < 1000) {
+    const check = await client.query('SELECT id FROM products WHERE LOWER(sku) = LOWER($1) LIMIT 1', [sku]);
+    if (check.rows.length === 0) return sku;
+    sku = `${base}-${suffix}`.toUpperCase();
+    suffix += 1;
+  }
+
+  return `${base}-${Date.now()}`.toUpperCase();
+}
+
+function deriveStockOverride(currentStock, minOrderQty) {
+  if (Number(currentStock || 0) <= 0) return 'out_of_stock';
+  if (Number(currentStock || 0) <= Math.max(Number(minOrderQty || 1), 10)) return 'limited_stock';
+  return null;
+}
+
+const listVendorProductSubmissions = async (req, res) => {
+  try {
+    const { status, vendor_id, search } = req.query;
+    const params = [];
+    const where = ['1=1'];
+
+    if (status && PRODUCT_SUBMISSION_STATUSES.includes(status)) {
+      params.push(status);
+      where.push(`ps.submission_status = $${params.length}`);
+    }
+
+    const vendorId = parseInteger(vendor_id);
+    if (vendorId) {
+      params.push(vendorId);
+      where.push(`ps.vendor_id = $${params.length}`);
+    }
+
+    if (search) {
+      params.push(`%${String(search).trim()}%`);
+      where.push(`(
+        ps.product_name ILIKE $${params.length}
+        OR COALESCE(ps.sku, '') ILIKE $${params.length}
+        OR v.store_name ILIKE $${params.length}
+        OR COALESCE(c.name, '') ILIKE $${params.length}
+      )`);
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        ps.*,
+        v.store_name,
+        v.store_slug,
+        v.status AS vendor_status,
+        v.verification_status,
+        c.name AS category_name,
+        p.id AS live_product_id,
+        p.vendor_approval_status AS live_product_status
+      FROM vendor_product_submissions ps
+      JOIN vendors v ON v.id = ps.vendor_id
+      LEFT JOIN categories c ON c.id = ps.category_id
+      LEFT JOIN products p ON p.id = ps.product_id
+      WHERE ${where.join(' AND ')}
+      ORDER BY
+        CASE ps.submission_status
+          WHEN 'submitted' THEN 0
+          WHEN 'changes_requested' THEN 1
+          WHEN 'draft' THEN 2
+          ELSE 3
+        END,
+        ps.created_at DESC
+      LIMIT 250
+      `,
+      params
+    );
+
+    return handleSuccess(res, 200, 'Vendor product submissions retrieved', result.rows);
+  } catch (err) {
+    return handleError(res, 500, 'Failed to retrieve vendor product submissions', err);
+  }
+};
+
+const getVendorProductSubmissionById = async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT
+        ps.*,
+        v.store_name,
+        v.store_slug,
+        v.status AS vendor_status,
+        v.verification_status,
+        v.commission_rate AS vendor_default_commission_rate,
+        v.minimum_margin_percent AS vendor_default_minimum_margin,
+        c.name AS category_name,
+        p.id AS live_product_id,
+        p.name AS live_product_name,
+        p.vendor_approval_status AS live_product_status
+      FROM vendor_product_submissions ps
+      JOIN vendors v ON v.id = ps.vendor_id
+      LEFT JOIN categories c ON c.id = ps.category_id
+      LEFT JOIN products p ON p.id = ps.product_id
+      WHERE ps.id = $1
+      LIMIT 1
+      `,
+      [req.params.id]
+    );
+
+    if (result.rows.length === 0) {
+      return handleError(res, 404, 'Vendor product submission not found');
+    }
+
+    return handleSuccess(res, 200, 'Vendor product submission retrieved', result.rows[0]);
+  } catch (err) {
+    return handleError(res, 500, 'Failed to retrieve vendor product submission', err);
+  }
+};
+
+const approveVendorProductSubmission = async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const submissionResult = await client.query(
+      `
+      SELECT
+        ps.*,
+        v.status AS vendor_status,
+        v.verification_status,
+        v.max_products,
+        v.store_name,
+        v.commission_rate AS vendor_commission_rate,
+        v.minimum_margin_percent AS vendor_minimum_margin
+      FROM vendor_product_submissions ps
+      JOIN vendors v ON v.id = ps.vendor_id
+      WHERE ps.id = $1
+      FOR UPDATE OF ps
+      `,
+      [req.params.id]
+    );
+
+    if (submissionResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return handleError(res, 404, 'Vendor product submission not found');
+    }
+
+    const submission = submissionResult.rows[0];
+    if (!['submitted', 'changes_requested'].includes(submission.submission_status)) {
+      await client.query('ROLLBACK');
+      return handleError(res, 400, 'Only submitted or changes-requested products can be approved');
+    }
+
+    if (submission.vendor_status !== 'active') {
+      await client.query('ROLLBACK');
+      return handleError(res, 400, 'Vendor store must be active before products can be approved');
+    }
+
+    const countResult = await client.query(
+      `
+      SELECT COUNT(*)::int AS approved_products
+      FROM products
+      WHERE vendor_id = $1
+        AND product_owner_type = 'vendor'
+        AND vendor_approval_status = 'approved'
+      `,
+      [submission.vendor_id]
+    );
+
+    if (Number(submission.max_products) > 0 && Number(countResult.rows[0].approved_products) >= Number(submission.max_products)) {
+      await client.query('ROLLBACK');
+      return handleError(res, 400, 'Vendor product limit reached. Upgrade the vendor plan before approving more products.');
+    }
+
+    const retailPrice = requirePositiveMoney(req.body?.retail_price ?? submission.proposed_retail_price, 'retail_price');
+    const wholesalePrice = requireNonNegativeMoney(
+      req.body?.wholesale_price ?? submission.proposed_wholesale_price ?? retailPrice,
+      'wholesale_price',
+      retailPrice
+    );
+    const costPrice = requireNonNegativeMoney(
+      req.body?.cost_price ?? submission.proposed_cost_price,
+      'cost_price',
+      null
+    );
+    const commissionRate = requireNonNegativeMoney(
+      req.body?.commission_rate ?? submission.commission_rate ?? submission.vendor_commission_rate,
+      'commission_rate',
+      0
+    );
+    if (commissionRate > 100) {
+      await client.query('ROLLBACK');
+      return handleError(res, 400, 'commission_rate cannot exceed 100');
+    }
+
+    const vendorNetPrice = requireNonNegativeMoney(
+      req.body?.vendor_net_price,
+      'vendor_net_price',
+      Number((retailPrice * (1 - commissionRate / 100)).toFixed(2))
+    );
+    const sku = await createUniqueProductSku(client, submission.vendor_id, submission.id, req.body?.sku || submission.sku, submission.product_name);
+    const stockOverride = deriveStockOverride(submission.current_stock, submission.min_order_qty);
+
+    const productResult = await client.query(
+      `
+      INSERT INTO products
+        (
+          name,
+          description,
+          sku,
+          barcode,
+          category_id,
+          department_id,
+          current_stock,
+          stock_status_override,
+          cost_price,
+          retail_price,
+          wholesale_price,
+          min_qty_wholesale,
+          requires_manual_price,
+          image_url,
+          pricing_rule_id,
+          min_order_qty,
+          order_qty_step,
+          selling_unit_label,
+          reorder_level,
+          is_combo_eligible,
+          is_active,
+          vendor_id,
+          product_owner_type,
+          vendor_approval_status,
+          vendor_product_submission_id,
+          vendor_commission_rate,
+          vendor_net_price,
+          vendor_price_reviewed_at,
+          vendor_price_review_notes
+        )
+      VALUES
+        ($1,$2,$3,NULL,$4,NULL,$5,$6,$7,$8,$9,NULL,FALSE,$10,NULL,$11,$12,$13,10,FALSE,TRUE,
+         $14,'vendor','approved',$15,$16,$17,NOW(),$18)
+      RETURNING *
+      `,
+      [
+        submission.product_name,
+        submission.description,
+        sku,
+        submission.category_id,
+        submission.current_stock,
+        stockOverride,
+        costPrice,
+        retailPrice,
+        wholesalePrice,
+        submission.image_url,
+        submission.min_order_qty,
+        submission.order_qty_step,
+        submission.selling_unit_label || 'piece',
+        submission.vendor_id,
+        submission.id,
+        commissionRate,
+        vendorNetPrice,
+        trimOrNull(req.body?.price_review_notes || submission.price_review_notes || submission.admin_review_notes),
+      ]
+    );
+
+    const updatedSubmission = await client.query(
+      `
+      UPDATE vendor_product_submissions
+      SET submission_status = 'approved',
+          product_id = $1,
+          commission_rate = $2,
+          vendor_net_price = $3,
+          price_review_notes = $4,
+          admin_review_notes = $5,
+          reviewed_by = $6,
+          reviewed_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $7
+      RETURNING *
+      `,
+      [
+        productResult.rows[0].id,
+        commissionRate,
+        vendorNetPrice,
+        trimOrNull(req.body?.price_review_notes || submission.price_review_notes),
+        trimOrNull(req.body?.admin_review_notes || req.body?.review_notes),
+        getActorId(req),
+        submission.id,
+      ]
+    );
+
+    await client.query(
+      `
+      INSERT INTO vendor_audit_logs (vendor_id, actor_type, actor_id, action, details)
+      VALUES ($1, 'admin', $2, 'vendor_product_approved', $3::jsonb)
+      `,
+      [
+        submission.vendor_id,
+        getActorId(req),
+        JSON.stringify({ submission_id: submission.id, product_id: productResult.rows[0].id, sku }),
+      ]
+    );
+
+    await client.query('COMMIT');
+
+    return handleSuccess(res, 200, 'Vendor product approved and published', {
+      submission: updatedSubmission.rows[0],
+      product: productResult.rows[0],
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    if (err.code === '23505') {
+      return handleError(res, 409, 'Product SKU already exists');
+    }
+    if (err.code === '23503') {
+      return handleError(res, 400, 'Invalid category or vendor reference', err);
+    }
+    return handleError(res, 500, 'Failed to approve vendor product', err);
+  } finally {
+    client.release();
+  }
+};
+
+const requestVendorProductChanges = async (req, res) => {
+  try {
+    const notes = trimOrNull(req.body?.admin_review_notes || req.body?.review_notes || req.body?.reason);
+    if (!notes) {
+      return handleError(res, 400, 'Review notes are required when requesting changes');
+    }
+
+    const result = await pool.query(
+      `
+      UPDATE vendor_product_submissions
+      SET submission_status = 'changes_requested',
+          admin_review_notes = $1,
+          reviewed_by = $2,
+          reviewed_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $3
+        AND submission_status = 'submitted'
+      RETURNING *
+      `,
+      [notes, getActorId(req), req.params.id]
+    );
+
+    if (result.rows.length === 0) {
+      return handleError(res, 404, 'Vendor product submission not found or cannot be changed');
+    }
+
+    await pool.query(
+      `
+      INSERT INTO vendor_audit_logs (vendor_id, actor_type, actor_id, action, details)
+      VALUES ($1, 'admin', $2, 'vendor_product_changes_requested', $3::jsonb)
+      `,
+      [result.rows[0].vendor_id, getActorId(req), JSON.stringify({ submission_id: result.rows[0].id, notes })]
+    );
+
+    return handleSuccess(res, 200, 'Product changes requested', result.rows[0]);
+  } catch (err) {
+    return handleError(res, 500, 'Failed to request vendor product changes', err);
+  }
+};
+
+const rejectVendorProductSubmission = async (req, res) => {
+  try {
+    const reason = trimOrNull(req.body?.rejection_reason || req.body?.reason);
+    if (!reason) {
+      return handleError(res, 400, 'rejection_reason is required');
+    }
+
+    const result = await pool.query(
+      `
+      UPDATE vendor_product_submissions
+      SET submission_status = 'rejected',
+          rejection_reason = $1,
+          admin_review_notes = $2,
+          reviewed_by = $3,
+          reviewed_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $4
+        AND submission_status IN ('submitted', 'changes_requested')
+      RETURNING *
+      `,
+      [
+        reason,
+        trimOrNull(req.body?.admin_review_notes || req.body?.review_notes),
+        getActorId(req),
+        req.params.id,
+      ]
+    );
+
+    if (result.rows.length === 0) {
+      return handleError(res, 404, 'Vendor product submission not found or cannot be rejected');
+    }
+
+    await pool.query(
+      `
+      INSERT INTO vendor_audit_logs (vendor_id, actor_type, actor_id, action, details)
+      VALUES ($1, 'admin', $2, 'vendor_product_rejected', $3::jsonb)
+      `,
+      [result.rows[0].vendor_id, getActorId(req), JSON.stringify({ submission_id: result.rows[0].id, reason })]
+    );
+
+    return handleSuccess(res, 200, 'Vendor product rejected', result.rows[0]);
+  } catch (err) {
+    return handleError(res, 500, 'Failed to reject vendor product', err);
+  }
+};
+
 module.exports = {
   listPublicVendorPlans,
+  listPublicVendorStores,
+  getPublicVendorStoreBySlug,
+  loginVendor,
   submitVendorApplication,
   listVendorApplications,
   getVendorApplicationById,
@@ -1069,7 +2374,19 @@ module.exports = {
   listVendors,
   getVendorById,
   updateVendor,
+  getVendorMe,
+  changeVendorPassword,
+  updateMyVendorProfile,
+  listMyVendorProductSubmissions,
+  createMyVendorProductSubmission,
+  updateMyVendorProductSubmission,
+  submitMyVendorProductSubmission,
   listVendorPlans,
   createVendorPlan,
   updateVendorPlan,
+  listVendorProductSubmissions,
+  getVendorProductSubmissionById,
+  approveVendorProductSubmission,
+  requestVendorProductChanges,
+  rejectVendorProductSubmission,
 };

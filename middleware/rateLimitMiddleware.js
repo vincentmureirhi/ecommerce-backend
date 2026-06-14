@@ -78,6 +78,28 @@ const vendorApplicationRateLimiter = rateLimit({
   },
 });
 
+const vendorLoginRateLimiter = rateLimit({
+  windowMs: envInt('VENDOR_LOGIN_RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000, { min: 1000 }),
+  max: envInt('VENDOR_LOGIN_RATE_LIMIT_MAX', 20, { min: 1 }),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many vendor login attempts. Please retry later.',
+  },
+});
+
+const vendorPortalRateLimiter = rateLimit({
+  windowMs: envInt('VENDOR_PORTAL_RATE_LIMIT_WINDOW_MS', 60 * 1000, { min: 1000 }),
+  max: envInt('VENDOR_PORTAL_RATE_LIMIT_MAX', 120, { min: 1 }),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many vendor portal requests. Please retry in a minute.',
+  },
+});
+
 module.exports = {
   apiRateLimiter,
   routeCustomerUpsertRateLimiter,
@@ -85,4 +107,6 @@ module.exports = {
   salesRepRateLimiter,
   orderTrackingRateLimiter,
   vendorApplicationRateLimiter,
+  vendorLoginRateLimiter,
+  vendorPortalRateLimiter,
 };

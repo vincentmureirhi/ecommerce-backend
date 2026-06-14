@@ -170,6 +170,11 @@ const getAllProducts = async (req, res) => {
         END) AS stock_status,
         c.name AS category_name,
         d.name AS department_name,
+        v.store_name AS vendor_store_name,
+        v.store_slug AS vendor_store_slug,
+        v.verification_status AS vendor_verification_status,
+        v.verification_badge_label AS vendor_verification_badge_label,
+        (v.id IS NOT NULL AND v.verification_status = 'verified') AS vendor_verified,
         active_flash_sale.id AS flash_sale_id,
         active_flash_sale.name AS flash_sale_name,
         active_flash_sale.discount_type,
@@ -189,6 +194,7 @@ const getAllProducts = async (req, res) => {
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN departments d ON d.id = p.department_id
+      LEFT JOIN vendors v ON v.id = p.vendor_id
       LEFT JOIN LATERAL (
         SELECT
           fs.id,
@@ -256,6 +262,11 @@ const getProductById = async (req, res) => {
         END) AS stock_status,
         c.name AS category_name,
         d.name AS department_name,
+        v.store_name AS vendor_store_name,
+        v.store_slug AS vendor_store_slug,
+        v.verification_status AS vendor_verification_status,
+        v.verification_badge_label AS vendor_verification_badge_label,
+        (v.id IS NOT NULL AND v.verification_status = 'verified') AS vendor_verified,
         active_flash_sale.id AS flash_sale_id,
         active_flash_sale.name AS flash_sale_name,
         active_flash_sale.discount_type,
@@ -290,6 +301,7 @@ const getProductById = async (req, res) => {
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN departments d ON d.id = p.department_id
+      LEFT JOIN vendors v ON v.id = p.vendor_id
       LEFT JOIN LATERAL (
         SELECT
           fs.id,
