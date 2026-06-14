@@ -500,27 +500,36 @@ function validateApprovalGuardrails({ application, creditLimit, fileStats }) {
     throwGuardrail('Approved credit limit must be a valid non-negative number');
   }
 
-  if (!application.admin_reviewed) {
-    throwGuardrail('Admin review must be completed before approval');
+  if (!String(application.applicant_name || application.business_name || '').trim()) {
+    throwGuardrail('Applicant or business name is required before approval');
   }
 
-  if (Number(fileStats.received_form_files || 0) < 1) {
-    throwGuardrail('Upload at least one received form before approving this application');
+  if (!String(application.email || '').trim()) {
+    throwGuardrail('Applicant email is required before approval');
+  }
+
+  if (!String(application.phone || '').trim()) {
+    throwGuardrail('Applicant phone is required before approval');
+  }
+
+  if (!application.region_id || !application.location_id) {
+    throwGuardrail('Region and location must be selected before approval');
   }
 
   const submittedVia = String(application.submitted_via || '').toLowerCase();
 
+  if (submittedVia === 'upload' && Number(fileStats.received_form_files || 0) < 1) {
+    throwGuardrail('Upload at least one received form before approving an uploaded application');
+  }
+
   if (submittedVia === 'email') {
-    if (!String(application.received_email_subject || '').trim()) {
-      throwGuardrail('Email-submitted applications cannot be approved without a received email subject');
-    }
+    const hasAnyEmailEvidence =
+      Boolean(String(application.received_email_subject || '').trim()) ||
+      Boolean(String(application.received_email_from || '').trim()) ||
+      Boolean(application.received_on_email_at);
 
-    if (!String(application.received_email_from || '').trim()) {
-      throwGuardrail('Email-submitted applications cannot be approved without a sender email');
-    }
-
-    if (!application.received_on_email_at) {
-      throwGuardrail('Email-submitted applications cannot be approved without a received email timestamp');
+    if (hasAnyEmailEvidence && !String(application.received_email_from || application.email || '').trim()) {
+      throwGuardrail('Email-submitted applications need a sender email before approval');
     }
   }
 
@@ -1222,20 +1231,68 @@ const listRouteCustomers = async (req, res) => {
         a.is_active AS account_is_active,
         COALESCE(cp.is_credit_active, TRUE) AS is_credit_active,
         COALESCE(cp.credit_notes, '') AS credit_notes,
-        fs.credit_limit,
-        fs.current_balance,
-        fs.available_credit,
-        fs.overdue_balance,
-        fs.total_route_orders,
-        fs.total_ordered_value,
-        fs.total_paid_value,
+        COALESCE(cp.credit_limit, 0)::numeric(12,2) AS credit_limit,
+        COALESCE(fs.current_balance, 0)::numeric(12,2) AS current_balance,
+        GREATEST(COALESCE(cp.credit_limit, 0) - COALESCE(fs.current_balance, 0), 0)::numeric(12,2) AS available_credit,
+        COALESCE(fs.overdue_balance, 0)::numeric(12,2) AS overdue_balance,
+        COALESCE(fs.total_route_orders, 0)::int AS total_route_orders,
+        COALESCE(fs.total_ordered_value, 0)::numeric(12,2) AS total_ordered_value,
+        COALESCE(fs.total_paid_value, 0)::numeric(12,2) AS total_paid_value,
         fs.last_route_order_at
       FROM customers c
       LEFT JOIN locations l ON c.location_id = l.id
       LEFT JOIN regions r ON l.region_id = r.id
       LEFT JOIN route_customer_accounts a ON a.customer_id = c.id
       LEFT JOIN route_customer_credit_profiles cp ON cp.customer_id = c.id
-      LEFT JOIN route_customer_financial_summary fs ON fs.customer_id = c.id
+      LEFT JOIN LATERAL (
+        SELECT
+          COALESCE(SUM(
+            CASE
+              WHEN o.order_type = 'route'
+               AND COALESCE(o.order_status, '') <> 'cancelled'
+              THEN o.total_amount
+              ELSE 0
+            END
+          ), 0)::numeric(12,2) AS total_ordered_value,
+          COALESCE(SUM(
+            CASE
+              WHEN o.order_type = 'route'
+               AND COALESCE(o.order_status, '') <> 'cancelled'
+              THEN COALESCE(o.amount_paid, 0)
+              ELSE 0
+            END
+          ), 0)::numeric(12,2) AS total_paid_value,
+          COALESCE(SUM(
+            CASE
+              WHEN o.order_type = 'route'
+               AND COALESCE(o.order_status, '') <> 'cancelled'
+              THEN GREATEST(COALESCE(o.total_amount, 0) - COALESCE(o.amount_paid, 0), 0)
+              ELSE 0
+            END
+          ), 0)::numeric(12,2) AS current_balance,
+          COALESCE(SUM(
+            CASE
+              WHEN o.order_type = 'route'
+               AND COALESCE(o.order_status, '') <> 'cancelled'
+               AND o.due_date IS NOT NULL
+               AND o.due_date < CURRENT_DATE
+              THEN GREATEST(COALESCE(o.total_amount, 0) - COALESCE(o.amount_paid, 0), 0)
+              ELSE 0
+            END
+          ), 0)::numeric(12,2) AS overdue_balance,
+          COUNT(DISTINCT CASE
+            WHEN o.order_type = 'route'
+             AND COALESCE(o.order_status, '') <> 'cancelled'
+            THEN o.id
+          END) AS total_route_orders,
+          MAX(CASE
+            WHEN o.order_type = 'route'
+             AND COALESCE(o.order_status, '') <> 'cancelled'
+            THEN o.created_at
+          END) AS last_route_order_at
+        FROM orders o
+        WHERE o.customer_id = c.id
+      ) fs ON TRUE
       WHERE c.customer_type = 'route'
       ORDER BY c.id ASC
       `
@@ -1888,9 +1945,79 @@ const getRouteCustomerDashboard = async (req, res) => {
 
     const summaryResult = await pool.query(
       `
-      SELECT *
-      FROM route_customer_financial_summary
-      WHERE customer_id = $1
+      SELECT
+        c.id AS customer_id,
+        c.name AS customer_name,
+        c.email,
+        c.phone,
+        c.location_id,
+        l.name AS location_name,
+        r.id AS region_id,
+        r.name AS region_name,
+        COALESCE(cp.credit_limit, 0)::numeric(12,2) AS credit_limit,
+        COALESCE(cp.is_credit_active, TRUE) AS is_credit_active,
+        COALESCE(fs.total_ordered_value, 0)::numeric(12,2) AS total_ordered_value,
+        COALESCE(fs.total_paid_value, 0)::numeric(12,2) AS total_paid_value,
+        COALESCE(fs.current_balance, 0)::numeric(12,2) AS current_balance,
+        COALESCE(fs.overdue_balance, 0)::numeric(12,2) AS overdue_balance,
+        GREATEST(COALESCE(cp.credit_limit, 0) - COALESCE(fs.current_balance, 0), 0)::numeric(12,2) AS available_credit,
+        COALESCE(fs.total_route_orders, 0)::int AS total_route_orders,
+        fs.last_route_order_at
+      FROM customers c
+      LEFT JOIN route_customer_credit_profiles cp ON cp.customer_id = c.id
+      LEFT JOIN locations l ON l.id = c.location_id
+      LEFT JOIN regions r ON r.id = l.region_id
+      LEFT JOIN LATERAL (
+        SELECT
+          COALESCE(SUM(
+            CASE
+              WHEN o.order_type = 'route'
+               AND COALESCE(o.order_status, '') <> 'cancelled'
+              THEN o.total_amount
+              ELSE 0
+            END
+          ), 0)::numeric(12,2) AS total_ordered_value,
+          COALESCE(SUM(
+            CASE
+              WHEN o.order_type = 'route'
+               AND COALESCE(o.order_status, '') <> 'cancelled'
+              THEN COALESCE(o.amount_paid, 0)
+              ELSE 0
+            END
+          ), 0)::numeric(12,2) AS total_paid_value,
+          COALESCE(SUM(
+            CASE
+              WHEN o.order_type = 'route'
+               AND COALESCE(o.order_status, '') <> 'cancelled'
+              THEN GREATEST(COALESCE(o.total_amount, 0) - COALESCE(o.amount_paid, 0), 0)
+              ELSE 0
+            END
+          ), 0)::numeric(12,2) AS current_balance,
+          COALESCE(SUM(
+            CASE
+              WHEN o.order_type = 'route'
+               AND COALESCE(o.order_status, '') <> 'cancelled'
+               AND o.due_date IS NOT NULL
+               AND o.due_date < CURRENT_DATE
+              THEN GREATEST(COALESCE(o.total_amount, 0) - COALESCE(o.amount_paid, 0), 0)
+              ELSE 0
+            END
+          ), 0)::numeric(12,2) AS overdue_balance,
+          COUNT(DISTINCT CASE
+            WHEN o.order_type = 'route'
+             AND COALESCE(o.order_status, '') <> 'cancelled'
+            THEN o.id
+          END) AS total_route_orders,
+          MAX(CASE
+            WHEN o.order_type = 'route'
+             AND COALESCE(o.order_status, '') <> 'cancelled'
+            THEN o.created_at
+          END) AS last_route_order_at
+        FROM orders o
+        WHERE o.customer_id = c.id
+      ) fs ON TRUE
+      WHERE c.id = $1
+        AND c.customer_type = 'route'
       LIMIT 1
       `,
       [customerId]

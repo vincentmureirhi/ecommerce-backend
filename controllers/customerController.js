@@ -32,18 +32,51 @@ async function fetchCustomerById(id) {
       r.name AS region_name,
       sr.name AS sales_rep_name,
       COALESCE(sr.phone, sr.phone_number) AS sales_rep_phone,
-      COALESCE(fs.credit_limit, 0)::numeric(12,2) AS credit_limit,
+      COALESCE(cp.credit_limit, 0)::numeric(12,2) AS credit_limit,
       COALESCE(fs.current_balance, 0)::numeric(12,2) AS current_balance,
-      COALESCE(fs.available_credit, 0)::numeric(12,2) AS available_credit,
+      GREATEST(COALESCE(cp.credit_limit, 0) - COALESCE(fs.current_balance, 0), 0)::numeric(12,2) AS available_credit,
       COALESCE(fs.overdue_balance, 0)::numeric(12,2) AS overdue_balance,
-      COALESCE(fs.is_credit_active, TRUE) AS is_credit_active,
+      COALESCE(cp.is_credit_active, TRUE) AS is_credit_active,
       fs.total_route_orders,
       fs.last_route_order_at
     FROM customers c
     LEFT JOIN locations l ON c.location_id = l.id
     LEFT JOIN regions r ON l.region_id = r.id
     LEFT JOIN sales_reps sr ON c.sales_rep_id = sr.id
-    LEFT JOIN route_customer_financial_summary fs ON fs.customer_id = c.id
+    LEFT JOIN route_customer_credit_profiles cp ON cp.customer_id = c.id
+    LEFT JOIN LATERAL (
+      SELECT
+        COALESCE(SUM(
+          CASE
+            WHEN o.order_type = 'route'
+             AND COALESCE(o.order_status, '') <> 'cancelled'
+            THEN GREATEST(COALESCE(o.total_amount, 0) - COALESCE(o.amount_paid, 0), 0)
+            ELSE 0
+          END
+        ), 0)::numeric(12,2) AS current_balance,
+        COALESCE(SUM(
+          CASE
+            WHEN o.order_type = 'route'
+             AND COALESCE(o.order_status, '') <> 'cancelled'
+             AND o.due_date IS NOT NULL
+             AND o.due_date < CURRENT_DATE
+            THEN GREATEST(COALESCE(o.total_amount, 0) - COALESCE(o.amount_paid, 0), 0)
+            ELSE 0
+          END
+        ), 0)::numeric(12,2) AS overdue_balance,
+        COUNT(DISTINCT CASE
+          WHEN o.order_type = 'route'
+           AND COALESCE(o.order_status, '') <> 'cancelled'
+          THEN o.id
+        END) AS total_route_orders,
+        MAX(CASE
+          WHEN o.order_type = 'route'
+           AND COALESCE(o.order_status, '') <> 'cancelled'
+          THEN o.created_at
+        END) AS last_route_order_at
+      FROM orders o
+      WHERE o.customer_id = c.id
+    ) fs ON TRUE
     WHERE c.id = $1
     `,
     [id]
@@ -75,13 +108,48 @@ const getAllCustomers = async (req, res) => {
         l.name AS location_name,
         r.name AS region_name,
         sr.name AS sales_rep_name,
-        COALESCE(fs.credit_limit, 0)::numeric(12,2) AS credit_limit,
-        COALESCE(fs.current_balance, 0)::numeric(12,2) AS current_balance,
-        COALESCE(fs.available_credit, 0)::numeric(12,2) AS available_credit,
-        COALESCE(fs.overdue_balance, 0)::numeric(12,2) AS overdue_balance,
-        COALESCE(fs.is_credit_active, TRUE) AS is_credit_active,
-        fs.total_route_orders,
-        fs.last_route_order_at,
+        COALESCE(cp.credit_limit, 0)::numeric(12,2) AS credit_limit,
+        COALESCE(SUM(
+          CASE
+            WHEN o.order_type = 'route'
+             AND COALESCE(o.order_status, '') <> 'cancelled'
+            THEN GREATEST(COALESCE(o.total_amount, 0) - COALESCE(o.amount_paid, 0), 0)
+            ELSE 0
+          END
+        ), 0)::numeric(12,2) AS current_balance,
+        GREATEST(
+          COALESCE(cp.credit_limit, 0) -
+          COALESCE(SUM(
+            CASE
+              WHEN o.order_type = 'route'
+               AND COALESCE(o.order_status, '') <> 'cancelled'
+              THEN GREATEST(COALESCE(o.total_amount, 0) - COALESCE(o.amount_paid, 0), 0)
+              ELSE 0
+            END
+          ), 0),
+          0
+        )::numeric(12,2) AS available_credit,
+        COALESCE(SUM(
+          CASE
+            WHEN o.order_type = 'route'
+             AND COALESCE(o.order_status, '') <> 'cancelled'
+             AND o.due_date IS NOT NULL
+             AND o.due_date < CURRENT_DATE
+            THEN GREATEST(COALESCE(o.total_amount, 0) - COALESCE(o.amount_paid, 0), 0)
+            ELSE 0
+          END
+        ), 0)::numeric(12,2) AS overdue_balance,
+        COALESCE(cp.is_credit_active, TRUE) AS is_credit_active,
+        COUNT(DISTINCT CASE
+          WHEN o.order_type = 'route'
+           AND COALESCE(o.order_status, '') <> 'cancelled'
+          THEN o.id
+        END) AS total_route_orders,
+        MAX(CASE
+          WHEN o.order_type = 'route'
+           AND COALESCE(o.order_status, '') <> 'cancelled'
+          THEN o.created_at
+        END) AS last_route_order_at,
         COUNT(DISTINCT o.id) AS orders_count,
         COALESCE(SUM(o.total_amount), 0)::numeric(12,2) AS total_spent,
         COALESCE(SUM(COALESCE(o.amount_paid, 0)), 0)::numeric(12,2) AS total_paid,
@@ -94,7 +162,7 @@ const getAllCustomers = async (req, res) => {
       LEFT JOIN locations l ON c.location_id = l.id
       LEFT JOIN regions r ON l.region_id = r.id
       LEFT JOIN sales_reps sr ON c.sales_rep_id = sr.id
-      LEFT JOIN route_customer_financial_summary fs ON fs.customer_id = c.id
+      LEFT JOIN route_customer_credit_profiles cp ON cp.customer_id = c.id
       LEFT JOIN orders o ON o.customer_id = c.id
       WHERE 1=1
     `;
@@ -147,7 +215,7 @@ const getAllCustomers = async (req, res) => {
     }
 
     query += `
-      GROUP BY c.id, l.id, r.id, sr.id, fs.credit_limit, fs.current_balance, fs.available_credit, fs.overdue_balance, fs.is_credit_active, fs.total_route_orders, fs.last_route_order_at
+      GROUP BY c.id, l.id, r.id, sr.id, cp.credit_limit, cp.is_credit_active
       ORDER BY c.created_at DESC
     `;
 
@@ -749,6 +817,16 @@ const upsertRouteCustomer = async (req, res) => {
 
       targetCustomerId = insertResult.rows[0].id;
     }
+
+    await pool.query(
+      `
+      INSERT INTO route_customer_credit_profiles
+        (customer_id, credit_limit, is_credit_active, created_at, updated_at)
+      VALUES ($1, 0, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT (customer_id) DO NOTHING
+      `,
+      [targetCustomerId]
+    );
 
     const customer = await fetchCustomerById(targetCustomerId);
 
