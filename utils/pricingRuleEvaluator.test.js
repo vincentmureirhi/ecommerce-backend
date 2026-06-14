@@ -186,6 +186,40 @@ const { RULE_TYPES, resolveItemPricing, evaluateCartPricing, evaluateCartPricing
 }
 
 // Two products share GROUP_THRESHOLD rule; group total is below threshold → both get retail
+// Braids case: any mixed braid qty 12+ qualifies each product for its own wholesale price
+{
+  const rule = { id: 12, rule_type: RULE_TYPES.GROUP_THRESHOLD, threshold_qty: 12, name: 'Braids Mix 12', pricing_group_id: 12 };
+  const productA = {
+    id: 31,
+    retail_price: '120', wholesale_price: '95', min_qty_wholesale: 12,
+    requires_manual_price: false,
+    _pricingRule: rule,
+    _pricingGroupId: 12,
+  };
+  const productB = {
+    id: 32,
+    retail_price: '140', wholesale_price: '110', min_qty_wholesale: 12,
+    requires_manual_price: false,
+    _pricingRule: rule,
+    _pricingGroupId: 12,
+  };
+
+  const result = evaluateCartPricingWithMeta(
+    [
+      { product_id: 31, quantity: 7 },
+      { product_id: 32, quantity: 5 },
+    ],
+    { 31: productA, 32: productB },
+    {}
+  );
+
+  assert.strictEqual(result[0].effective_qty, 12, 'braids group qty 7+5=12');
+  assert.strictEqual(result[0].unit_price.toFixed(2), '95.00');
+  assert.strictEqual(result[1].unit_price.toFixed(2), '110.00');
+  assert.strictEqual(result[0].price_source, 'rule:GROUP_THRESHOLD:wholesale');
+  assert.strictEqual(result[1].price_source, 'rule:GROUP_THRESHOLD:wholesale');
+}
+
 {
   const rule = { id: 11, rule_type: RULE_TYPES.GROUP_THRESHOLD, threshold_qty: 20 };
 
@@ -685,6 +719,53 @@ const { RULE_TYPES, resolveItemPricing, evaluateCartPricing, evaluateCartPricing
 // ─────────────────────────────────────────────────────────────────────────────
 // evaluateCartPricingWithMeta — GROUP_THRESHOLD with explicit _pricingGroupId
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Brazilian wool case: mixed wool qty 1-5 is 100 each; 6+ is 50 each
+{
+  const rule = { id: 92, rule_type: RULE_TYPES.GROUP_TIERED, threshold_qty: null, name: 'Brazilian Wool Tier Ladder', pricing_group_id: 7 };
+  const productA = {
+    id: 204,
+    retail_price: '100', wholesale_price: '50', min_qty_wholesale: 6,
+    requires_manual_price: false,
+    _pricingRule: rule,
+    _pricingGroupId: 7,
+  };
+  const productB = {
+    id: 205,
+    retail_price: '100', wholesale_price: '50', min_qty_wholesale: 6,
+    requires_manual_price: false,
+    _pricingRule: rule,
+    _pricingGroupId: 7,
+  };
+  const ruleTiersMap = {
+    92: [
+      { min_qty: 1, max_qty: 5, unit_price: '100' },
+      { min_qty: 6, max_qty: null, unit_price: '50' },
+    ],
+  };
+
+  const retailBand = evaluateCartPricingWithMeta(
+    [{ product_id: 204, quantity: 5 }],
+    { 204: productA },
+    {},
+    ruleTiersMap
+  );
+  assert.strictEqual(retailBand[0].unit_price.toFixed(2), '100.00');
+  assert.strictEqual(retailBand[0].effective_qty, 5);
+
+  const wholesaleBand = evaluateCartPricingWithMeta(
+    [
+      { product_id: 204, quantity: 3 },
+      { product_id: 205, quantity: 3 },
+    ],
+    { 204: productA, 205: productB },
+    {},
+    ruleTiersMap
+  );
+  assert.strictEqual(wholesaleBand[0].effective_qty, 6);
+  assert.strictEqual(wholesaleBand[0].unit_price.toFixed(2), '50.00');
+  assert.strictEqual(wholesaleBand[1].unit_price.toFixed(2), '50.00');
+}
 
 // Products share an explicit pricing group (different from implicit rule.id grouping).
 // A product without the group should NOT affect the group total.
