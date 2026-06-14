@@ -233,6 +233,79 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+function escapeHtmlWithBreaks(value) {
+  return escapeHtml(value).replace(/\r?\n/g, '<br />');
+}
+
+const BUSINESS_TIME_ZONE = 'Africa/Nairobi';
+
+function formatBusinessDateTime(value) {
+  if (!value) return '-';
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+
+  return date.toLocaleString('en-KE', {
+    timeZone: BUSINESS_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function parseLegacyRouteOrderNotes(value) {
+  const raw = String(value || '').trim();
+  if (!raw.startsWith('[ROUTE_CUSTOMER_ORDER]')) return null;
+
+  const parsed = {};
+  raw
+    .split(/\r?\n/)
+    .slice(1)
+    .forEach((line) => {
+      const index = line.indexOf('=');
+      if (index <= 0) return;
+      const key = line.slice(0, index).trim();
+      const val = line.slice(index + 1).trim();
+      if (key) parsed[key] = val;
+    });
+
+  return parsed;
+}
+
+function formatPrintableOrderNotes(order) {
+  const rawNotes = String(order.notes || '').trim();
+  const legacy = parseLegacyRouteOrderNotes(rawNotes);
+
+  if (legacy) {
+    const lines = [
+      `Route customer: ${legacy.route_customer_name || order.customer_name || '-'} (${legacy.route_customer_phone || order.customer_phone || '-'})`,
+      `Delivery area: ${legacy.route_customer_location || order.delivery_address || order.location_name || '-'}`,
+      legacy.captured_by_rep
+        ? `Captured by: ${legacy.captured_by_rep}${legacy.captured_by_rep_phone && legacy.captured_by_rep_phone !== '-' ? ` (${legacy.captured_by_rep_phone})` : ''}`
+        : '',
+      legacy.captured_by_rep_area && legacy.captured_by_rep_area !== '-'
+        ? `Rep route: ${legacy.captured_by_rep_area}`
+        : '',
+      legacy.captured_at ? `Captured: ${formatBusinessDateTime(legacy.captured_at)}` : '',
+      legacy.route_customer_notes ? `Customer route notes: ${legacy.route_customer_notes}` : '',
+      legacy.order_notes ? `Order notes: ${legacy.order_notes}` : '',
+      'Settlement: pay on delivery or approved route credit.',
+    ];
+
+    return lines.filter(Boolean).join('\n');
+  }
+
+  if (rawNotes) return rawNotes;
+
+  if (order.order_type === 'route') {
+    return 'Route delivery order. Customer pays on delivery unless approved credit terms apply.';
+  }
+
+  return '';
+}
+
 function deriveRoutePaymentState(totalAmount, amountPaid, dueDate) {
   const total = toNumber(totalAmount, 0);
   const paid = Math.max(0, toNumber(amountPaid, 0));
@@ -2146,6 +2219,8 @@ const getOrderForPrint = async (req, res) => {
       order.order_type === 'route'
         ? (order.payment_state || 'unpaid').toUpperCase()
         : (order.payment_status || 'pending').toUpperCase();
+    const printableNotes = formatPrintableOrderNotes(order);
+    const orderSheetSubtitle = order.order_type === 'route' ? 'ROUTE DELIVERY ORDER' : 'ORDER RECEIPT';
 
     const itemsHtml = items.length
       ? items
@@ -2376,7 +2451,7 @@ const getOrderForPrint = async (req, res) => {
         <div class="sheet">
           <div class="center">
             <div class="title">XPOSE DISTRIBUTORS</div>
-            <div class="sub">ORDER RECEIPT</div>
+            <div class="sub">${orderSheetSubtitle}</div>
           </div>
 
           <div class="line"></div>
@@ -2388,23 +2463,11 @@ const getOrderForPrint = async (req, res) => {
           </div>
           <div class="meta-row">
             <div class="meta-label">Date</div>
-            <div class="meta-value">${new Date(order.created_at).toLocaleString('en-US', {
-              year: 'numeric',
-              month: '2-digit',
-              day: '2-digit',
-              hour: '2-digit',
-              minute: '2-digit',
-            })}</div>
+            <div class="meta-value">${formatBusinessDateTime(order.created_at)}</div>
           </div>
           <div class="meta-row">
             <div class="meta-label">Printed</div>
-            <div class="meta-value">${order.printed_at ? new Date(order.printed_at).toLocaleString('en-US', {
-              year: 'numeric',
-              month: '2-digit',
-              day: '2-digit',
-              hour: '2-digit',
-              minute: '2-digit',
-            }) : '-'}</div>
+            <div class="meta-value">${formatBusinessDateTime(order.printed_at)}</div>
           </div>
 
           <div class="line"></div>
@@ -2492,11 +2555,11 @@ const getOrderForPrint = async (req, res) => {
           </div>
 
           ${
-            order.notes
+            printableNotes
               ? `
             <div class="line"></div>
             <div class="section-title">Notes</div>
-            <div class="note">${escapeHtml(order.notes)}</div>
+            <div class="note">${escapeHtmlWithBreaks(printableNotes)}</div>
           `
               : ''
           }
@@ -2506,13 +2569,7 @@ const getOrderForPrint = async (req, res) => {
           <div class="footer">
             <div>Thank you for shopping with us!</div>
             <div>XPOSE DISTRIBUTORS</div>
-            <div>${new Date().toLocaleString('en-US', {
-              year: 'numeric',
-              month: '2-digit',
-              day: '2-digit',
-              hour: '2-digit',
-              minute: '2-digit',
-            })}</div>
+            <div>${formatBusinessDateTime(new Date())}</div>
           </div>
         </div>
 
