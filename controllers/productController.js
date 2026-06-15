@@ -3,6 +3,7 @@
 const pool = require("../config/database");
 const { handleError, handleSuccess } = require("../utils/errorHandler");
 const Decimal = require("decimal.js");
+const { logActivity } = require("../middleware/auditMiddleware");
 
 function toInt(v, field, { allowNull = false } = {}) {
   if (v == null || v === "") {
@@ -458,6 +459,24 @@ const createProduct = async (req, res) => {
 
     await client.query("COMMIT");
 
+    await logActivity(
+      req.user?.id,
+      "product_created",
+      "product",
+      r.rows[0].id,
+      {
+        name: r.rows[0].name,
+        sku: r.rows[0].sku,
+        category_id: r.rows[0].category_id,
+        current_stock: r.rows[0].current_stock,
+        stock_status_override: r.rows[0].stock_status_override,
+        retail_price: r.rows[0].retail_price,
+        wholesale_price: r.rows[0].wholesale_price,
+        expiry_date: r.rows[0].expiry_date,
+      },
+      { req, actorType: req.user ? "admin" : "system" }
+    );
+
     return handleSuccess(res, 201, "Product created", r.rows[0]);
   } catch (err) {
     if (client) {
@@ -528,7 +547,23 @@ const updateProduct = async (req, res) => {
     await client.query("BEGIN");
 
     const existingProduct = await client.query(
-      `SELECT pricing_rule_id FROM products WHERE id = $1 FOR UPDATE`,
+      `
+      SELECT
+        id,
+        name,
+        sku,
+        pricing_rule_id,
+        current_stock,
+        stock_status_override,
+        retail_price,
+        wholesale_price,
+        cost_price,
+        is_active,
+        expiry_date
+      FROM products
+      WHERE id = $1
+      FOR UPDATE
+      `,
       [id]
     );
     if (existingProduct.rowCount === 0) {
@@ -625,6 +660,38 @@ const updateProduct = async (req, res) => {
 
     await client.query("COMMIT");
 
+    await logActivity(
+      req.user?.id,
+      "product_updated",
+      "product",
+      r.rows[0].id,
+      {
+        name: r.rows[0].name,
+        sku: r.rows[0].sku,
+        previous: {
+          name: existingProduct.rows[0].name,
+          sku: existingProduct.rows[0].sku,
+          current_stock: existingProduct.rows[0].current_stock,
+          stock_status_override: existingProduct.rows[0].stock_status_override,
+          retail_price: existingProduct.rows[0].retail_price,
+          wholesale_price: existingProduct.rows[0].wholesale_price,
+          cost_price: existingProduct.rows[0].cost_price,
+          is_active: existingProduct.rows[0].is_active,
+          expiry_date: existingProduct.rows[0].expiry_date,
+        },
+        current: {
+          current_stock: r.rows[0].current_stock,
+          stock_status_override: r.rows[0].stock_status_override,
+          retail_price: r.rows[0].retail_price,
+          wholesale_price: r.rows[0].wholesale_price,
+          cost_price: r.rows[0].cost_price,
+          is_active: r.rows[0].is_active,
+          expiry_date: r.rows[0].expiry_date,
+        },
+      },
+      { req, actorType: req.user ? "admin" : "system" }
+    );
+
     return handleSuccess(res, 200, "Product updated", r.rows[0]);
   } catch (err) {
     if (client) {
@@ -644,8 +711,27 @@ const updateProduct = async (req, res) => {
 const deleteProduct = async (req, res) => {
   try {
     const id = toInt(req.params.id, "id");
-    const r = await pool.query("DELETE FROM products WHERE id=$1", [id]);
+    const r = await pool.query(
+      "DELETE FROM products WHERE id=$1 RETURNING id, name, sku, current_stock, retail_price, wholesale_price",
+      [id]
+    );
     if (r.rowCount === 0) return handleError(res, 404, "Product not found");
+
+    await logActivity(
+      req.user?.id,
+      "product_deleted",
+      "product",
+      r.rows[0].id,
+      {
+        name: r.rows[0].name,
+        sku: r.rows[0].sku,
+        current_stock: r.rows[0].current_stock,
+        retail_price: r.rows[0].retail_price,
+        wholesale_price: r.rows[0].wholesale_price,
+      },
+      { req, actorType: req.user ? "admin" : "system" }
+    );
+
     return handleSuccess(res, 200, "Product deleted");
   } catch (err) {
     return handleError(res, 500, "Failed to delete product", err);
