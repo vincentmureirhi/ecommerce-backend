@@ -41,6 +41,24 @@ function cleanOptionalText(value) {
   return text || null;
 }
 
+function cleanExpiryDate(value) {
+  const text = String(value || '').trim();
+  if (!text) {
+    throw new Error('expiry_date is required');
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    throw new Error('expiry_date must be in YYYY-MM-DD format');
+  }
+
+  const date = new Date(`${text}T00:00:00Z`);
+  if (Number.isNaN(date.getTime()) || text !== date.toISOString().slice(0, 10)) {
+    throw new Error('expiry_date is invalid');
+  }
+
+  return text;
+}
+
 const STOCK_STATUS_OPTIONS = new Set(['in_stock', 'limited_stock', 'out_of_stock']);
 
 function cleanStockStatusOverride(value) {
@@ -355,6 +373,7 @@ const createProduct = async (req, res) => {
     const stock_status_override = cleanStockStatusOverride(
       req.body.stock_status_override ?? req.body.stock_status
     );
+    const expiry_date = cleanExpiryDate(req.body.expiry_date);
     const current_stock = normalizeStockForStatus(
       toInt(req.body.current_stock ?? 0, "current_stock"),
       stock_status_override
@@ -406,9 +425,9 @@ const createProduct = async (req, res) => {
         retail_price, wholesale_price, min_qty_wholesale,
         requires_manual_price, image_url, pricing_rule_id,
         min_order_qty, order_qty_step, selling_unit_label,
-        reorder_level, is_combo_eligible, is_active
+        reorder_level, is_combo_eligible, is_active, expiry_date
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
       RETURNING *
       `,
       [
@@ -433,6 +452,7 @@ const createProduct = async (req, res) => {
         reorder_level,
         is_combo_eligible,
         is_active,
+        expiry_date,
       ]
     );
 
@@ -444,6 +464,9 @@ const createProduct = async (req, res) => {
       try {
         await client.query("ROLLBACK");
       } catch (_) {}
+    }
+    if (/required|must be|invalid|cannot/i.test(String(err.message || ''))) {
+      return handleError(res, 400, err.message, err);
     }
     return handleError(res, 500, "Failed to create product", err);
   } finally {
@@ -468,6 +491,7 @@ const updateProduct = async (req, res) => {
     const stock_status_override = cleanStockStatusOverride(
       req.body.stock_status_override ?? req.body.stock_status
     );
+    const expiry_date = cleanExpiryDate(req.body.expiry_date);
     const current_stock = normalizeStockForStatus(
       toInt(req.body.current_stock ?? 0, "current_stock"),
       stock_status_override
@@ -567,8 +591,9 @@ const updateProduct = async (req, res) => {
         reorder_level=$19,
         is_combo_eligible=$20,
         is_active=$21,
+        expiry_date=$22,
         updated_at=CURRENT_TIMESTAMP
-      WHERE id=$22
+      WHERE id=$23
       RETURNING *
       `,
       [
@@ -593,6 +618,7 @@ const updateProduct = async (req, res) => {
         reorder_level,
         is_combo_eligible,
         is_active,
+        expiry_date,
         id,
       ]
     );
@@ -605,6 +631,9 @@ const updateProduct = async (req, res) => {
       try {
         await client.query("ROLLBACK");
       } catch (_) {}
+    }
+    if (/required|must be|invalid|cannot/i.test(String(err.message || ''))) {
+      return handleError(res, 400, err.message, err);
     }
     return handleError(res, 500, "Failed to update product", err);
   } finally {

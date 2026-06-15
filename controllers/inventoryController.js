@@ -32,6 +32,15 @@ function getMovementStatus({ totalUnitsSold, unitsSold7d, unitsSold30d, daysSinc
   return 'steady';
 }
 
+function getExpiryStatus(daysToExpiry) {
+  if (daysToExpiry === null || daysToExpiry === undefined) return 'missing';
+  if (daysToExpiry < 0) return 'expired';
+  if (daysToExpiry <= 30) return 'critical';
+  if (daysToExpiry <= 90) return 'warning';
+  if (daysToExpiry <= 210) return 'watch';
+  return 'healthy';
+}
+
 const getInventoryAnalytics = async (req, res) => {
   try {
     const { profit_type = 'retail' } = req.query;
@@ -97,6 +106,11 @@ const getInventoryAnalytics = async (req, res) => {
         COALESCE(p.cost_price, 0) AS cost_price,
         COALESCE(p.retail_price, 0) AS retail_price,
         COALESCE(p.wholesale_price, 0) AS wholesale_price,
+        p.expiry_date,
+        CASE
+          WHEN p.expiry_date IS NULL THEN NULL
+          ELSE (p.expiry_date - CURRENT_DATE)::int
+        END AS days_to_expiry,
         c.id AS category_id,
         c.name AS category_name,
         d.id AS supplier_id,
@@ -141,6 +155,10 @@ const getInventoryAnalytics = async (req, res) => {
         out_of_stock_count: 0,
         dead_stock_count: 0,
         reorder_now_count: 0,
+        expiry_watch_count: 0,
+        expiry_critical_count: 0,
+        expired_count: 0,
+        missing_expiry_count: 0,
         total_potential_profit: '0.00',
         profit_by_type: profit_type,
       },
@@ -164,6 +182,9 @@ const getInventoryAnalytics = async (req, res) => {
       const unitsSold7d = toNumber(p.units_sold_7d);
       const unitsSold30d = toNumber(p.units_sold_30d);
       const totalUnitsSold = toNumber(p.total_units_sold);
+      const daysToExpiry = p.days_to_expiry === null || p.days_to_expiry === undefined
+        ? null
+        : toNumber(p.days_to_expiry);
 
       const lastSaleDate = p.last_sale_date ? new Date(p.last_sale_date) : null;
       const daysSinceLastSale = lastSaleDate
@@ -177,6 +198,7 @@ const getInventoryAnalytics = async (req, res) => {
         unitsSold30d,
         daysSinceLastSale,
       });
+      const expiryStatus = getExpiryStatus(daysToExpiry);
 
       const stockValue = costPrice.times(currentStock);
       const retailValue = retailPrice.times(currentStock);
@@ -196,6 +218,10 @@ const getInventoryAnalytics = async (req, res) => {
       if (stockStatus === 'out_of_stock') analytics.summary.out_of_stock_count += 1;
       if (stockStatus === 'reorder_now') analytics.summary.reorder_now_count += 1;
       if (movementStatus === 'dead_stock') analytics.summary.dead_stock_count += 1;
+      if (expiryStatus === 'watch') analytics.summary.expiry_watch_count += 1;
+      if (expiryStatus === 'critical' || expiryStatus === 'warning') analytics.summary.expiry_critical_count += 1;
+      if (expiryStatus === 'expired') analytics.summary.expired_count += 1;
+      if (expiryStatus === 'missing') analytics.summary.missing_expiry_count += 1;
 
       analytics.products.push({
         id: p.id,
@@ -215,6 +241,9 @@ const getInventoryAnalytics = async (req, res) => {
         units_sold_7d: unitsSold7d,
         units_sold_30d: unitsSold30d,
         total_units_sold: totalUnitsSold,
+        expiry_date: p.expiry_date,
+        days_to_expiry: daysToExpiry,
+        expiry_status: expiryStatus,
         last_sale_date: p.last_sale_date,
         days_since_last_sale: daysSinceLastSale,
         last_sale_qty: toNumber(p.last_sale_qty, null),

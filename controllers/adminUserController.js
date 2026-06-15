@@ -4,10 +4,30 @@ const bcrypt = require('bcrypt');
 const pool = require('../config/database');
 const { handleError, handleSuccess } = require('../utils/errorHandler');
 
-const VALID_ROLES = ['superuser', 'admin', 'staff'];
+const VALID_ROLES = ['superuser', 'superadmin', 'admin', 'staff'];
 
 // Build a parameterized IN clause from the VALID_ROLES constant
 const ROLES_PLACEHOLDER = VALID_ROLES.map((_, i) => `$${i + 1}`).join(', ');
+
+function normalizeRole(role) {
+  const value = String(role || 'staff').trim().toLowerCase();
+  if (value === 'superadmin' || value === 'super_admin') return 'superuser';
+  return value;
+}
+
+function isSuperAdminRole(role) {
+  return role === 'superuser' || role === 'superadmin';
+}
+
+function splitFullName(name) {
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { firstName: '', lastName: '' };
+  if (parts.length === 1) return { firstName: parts[0], lastName: '-' };
+  return {
+    firstName: parts.slice(0, -1).join(' '),
+    lastName: parts[parts.length - 1],
+  };
+}
 
 const getAdminUsers = async (req, res) => {
   try {
@@ -37,16 +57,17 @@ const getAdminUsers = async (req, res) => {
 
 const createAdminUser = async (req, res) => {
   try {
-    if (req.user.role !== 'superuser') {
+    if (!isSuperAdminRole(req.user.role)) {
       return handleError(res, 403, 'Only superuser can create admin users');
     }
 
-    const { email, first_name, last_name, password, role } = req.body;
+    const { email, first_name, last_name, name, password, role } = req.body;
+    const splitName = splitFullName(name);
 
     const normalizedEmail = String(email || '').trim().toLowerCase();
-    const normalizedFirstName = String(first_name || '').trim();
-    const normalizedLastName = String(last_name || '').trim();
-    const normalizedRole = String(role || 'staff').trim().toLowerCase();
+    const normalizedFirstName = String(first_name || splitName.firstName || '').trim();
+    const normalizedLastName = String(last_name || splitName.lastName || '').trim();
+    const normalizedRole = normalizeRole(role || 'admin');
 
     if (!normalizedEmail) return handleError(res, 400, 'email is required');
     if (!normalizedFirstName) return handleError(res, 400, 'first_name is required');
@@ -79,12 +100,13 @@ const createAdminUser = async (req, res) => {
 
 const updateAdminUser = async (req, res) => {
   try {
-    if (req.user.role !== 'superuser') {
+    if (!isSuperAdminRole(req.user.role)) {
       return handleError(res, 403, 'Only superuser can update admin users');
     }
 
     const { id } = req.params;
-    const { first_name, last_name, email, is_active, password } = req.body;
+    const { first_name, last_name, name, email, is_active, password } = req.body;
+    const splitName = splitFullName(name);
 
     const existing = await pool.query(
       'SELECT id, role FROM users WHERE id = $1 AND role = ANY($2)',
@@ -98,13 +120,20 @@ const updateAdminUser = async (req, res) => {
     const params = [];
     let idx = 1;
 
-    if (first_name !== undefined) {
-      updates.push(`first_name = $${idx++}`);
-      params.push(String(first_name).trim());
+    if (isSuperAdminRole(existing.rows[0].role) && is_active === false) {
+      return handleError(res, 400, 'The superadmin account cannot be deactivated');
     }
-    if (last_name !== undefined) {
+
+    const resolvedFirstName = first_name !== undefined ? first_name : splitName.firstName || undefined;
+    const resolvedLastName = last_name !== undefined ? last_name : splitName.lastName || undefined;
+
+    if (resolvedFirstName !== undefined) {
+      updates.push(`first_name = $${idx++}`);
+      params.push(String(resolvedFirstName).trim());
+    }
+    if (resolvedLastName !== undefined) {
       updates.push(`last_name = $${idx++}`);
-      params.push(String(last_name).trim());
+      params.push(String(resolvedLastName).trim());
     }
     if (email !== undefined) {
       const normalizedEmail = String(email).trim().toLowerCase();
@@ -150,7 +179,7 @@ const updateAdminUser = async (req, res) => {
 
 const deleteAdminUser = async (req, res) => {
   try {
-    if (req.user.role !== 'superuser') {
+    if (!isSuperAdminRole(req.user.role)) {
       return handleError(res, 403, 'Only superuser can delete admin users');
     }
 
@@ -168,7 +197,7 @@ const deleteAdminUser = async (req, res) => {
       return handleError(res, 404, 'Admin user not found');
     }
 
-    if (existing.rows[0].role === 'superuser') {
+    if (isSuperAdminRole(existing.rows[0].role)) {
       return handleError(res, 400, 'Cannot delete a superuser account');
     }
 
@@ -187,14 +216,14 @@ const deleteAdminUser = async (req, res) => {
 
 const updateAdminUserRole = async (req, res) => {
   try {
-    if (req.user.role !== 'superuser') {
+    if (!isSuperAdminRole(req.user.role)) {
       return handleError(res, 403, 'Only superuser can change user roles');
     }
 
     const { id } = req.params;
     const { role } = req.body;
 
-    const normalizedRole = String(role || '').trim().toLowerCase();
+    const normalizedRole = normalizeRole(role);
     if (!VALID_ROLES.includes(normalizedRole)) {
       return handleError(res, 400, `role must be one of: ${VALID_ROLES.join(', ')}`);
     }
@@ -209,6 +238,10 @@ const updateAdminUserRole = async (req, res) => {
     );
     if (existing.rows.length === 0) {
       return handleError(res, 404, 'Admin user not found');
+    }
+
+    if (isSuperAdminRole(existing.rows[0].role)) {
+      return handleError(res, 400, 'The superadmin role cannot be changed');
     }
 
     const result = await pool.query(

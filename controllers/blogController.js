@@ -77,10 +77,14 @@ const getAllBlogPosts = async (req, res) => {
         bp.status,
         bp.published_at,
         bp.associated_product_id,
+        p.name AS associated_product_name,
+        p.image_url AS associated_product_image_url,
+        p.retail_price AS associated_product_price,
         bp.created_by_user_id,
         bp.created_at,
         bp.updated_at
       FROM blog_posts bp
+      LEFT JOIN products p ON p.id = bp.associated_product_id
       ${whereClause}
       ORDER BY bp.published_at DESC NULLS LAST, bp.created_at DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
@@ -132,10 +136,14 @@ const getBlogPost = async (req, res) => {
           bp.status,
           bp.published_at,
           bp.associated_product_id,
+          p.name AS associated_product_name,
+          p.image_url AS associated_product_image_url,
+          p.retail_price AS associated_product_price,
           bp.created_by_user_id,
           bp.created_at,
           bp.updated_at
         FROM blog_posts bp
+        LEFT JOIN products p ON p.id = bp.associated_product_id
         WHERE bp.id = $1
       `;
       params = [parseInt(idOrSlug)];
@@ -151,10 +159,14 @@ const getBlogPost = async (req, res) => {
           bp.status,
           bp.published_at,
           bp.associated_product_id,
+          p.name AS associated_product_name,
+          p.image_url AS associated_product_image_url,
+          p.retail_price AS associated_product_price,
           bp.created_by_user_id,
           bp.created_at,
           bp.updated_at
         FROM blog_posts bp
+        LEFT JOIN products p ON p.id = bp.associated_product_id
         WHERE bp.slug = $1
       `;
       params = [idOrSlug];
