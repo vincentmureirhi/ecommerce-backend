@@ -1,6 +1,7 @@
 'use strict';
 
 const pool = require('../config/database');
+const { handleError } = require('../utils/errorHandler');
 
 function toPositiveInteger(value, fallback, { min = 1, max = 100 } = {}) {
   const parsed = Number(value);
@@ -252,17 +253,12 @@ async function listStorefrontProducts(req, res) {
         search: String(req.query.search || req.query.q || '').trim(),
         category: req.query.category || 'all',
         sort: req.query.sort || 'featured',
+        requestId: req.requestId,
       },
     });
   } catch (err) {
     console.error('listStorefrontProducts error:', err.message);
-    return res.status(500).json({
-      success: false,
-      error: {
-        code: 'STOREFRONT_PRODUCTS_FAILED',
-        message: 'Failed to load storefront products',
-      },
-    });
+    return handleError(res, 500, 'Failed to load storefront products', err);
   }
 }
 
@@ -309,17 +305,14 @@ async function listStorefrontCategories(req, res) {
     return res.json({
       success: true,
       data: result.rows,
-      meta: { cache: 'public-categories' },
+      meta: {
+        cache: 'public-categories',
+        requestId: req.requestId,
+      },
     });
   } catch (err) {
     console.error('listStorefrontCategories error:', err.message);
-    return res.status(500).json({
-      success: false,
-      error: {
-        code: 'STOREFRONT_CATEGORIES_FAILED',
-        message: 'Failed to load storefront categories',
-      },
-    });
+    return handleError(res, 500, 'Failed to load storefront categories', err);
   }
 }
 

@@ -18,6 +18,8 @@ const { autoFailStalePendingPayments } = require('./jobs/paymentAutoFail');
 const { autoProgressOrders } = require('./jobs/orderProgressionJob');
 const { processQueuedSmsNotifications } = require('./jobs/smsOutboxJob');
 const { apiRateLimiter } = require('./middleware/rateLimitMiddleware');
+const { requestContextMiddleware } = require('./middleware/requestContextMiddleware');
+const { handleError } = require('./utils/errorHandler');
 
 // ===== ROUTES =====
 const authRoutes = require('./routes/auth');
@@ -81,6 +83,8 @@ app.use((req, res, next) => {
   res.setHeader('Permissions-Policy', 'geolocation=(self), camera=(), microphone=()');
   next();
 });
+
+app.use(requestContextMiddleware);
 
 // ===== WEBSOCKET =====
 initializeWebSocket(httpServer);
@@ -166,7 +170,17 @@ app.use('/images', express.static(path.join(__dirname, 'public/images')));
 // =====================================================
 
 app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
+  const startedAt = process.hrtime.bigint();
+
+  res.on('finish', () => {
+    const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+    const userId = req.user?.id ? ` user=${req.user.id}` : '';
+
+    console.log(
+      `[${new Date().toISOString()}] requestId=${req.requestId} ${req.method} ${req.originalUrl} status=${res.statusCode} durationMs=${durationMs.toFixed(1)}${userId}`
+    );
+  });
+
   next();
 });
 
@@ -182,13 +196,11 @@ app.get('/api/health', async (req, res) => {
       success: true,
       db: true,
       timestamp: result.rows[0].now,
+      requestId: req.requestId,
     });
 
   } catch (err) {
-    res.status(500).json({
-      success: false,
-      error: 'Health check failed',
-    });
+    return handleError(res, 500, 'Health check failed', err);
   }
 });
 
@@ -234,21 +246,18 @@ app.use('/api/pricing-groups', pricingGroupsRoutes);
 // =====================================================
 
 app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    message: 'Route not found',
-  });
+  return handleError(res, 404, 'Route not found');
 });
 
 app.use((err, req, res, next) => {
-  console.error(err);
+  console.error(`[UNHANDLED] requestId=${req.requestId || '-'} ${err.message}`, err);
 
-  res.status(500).json({
-    success: false,
-    message: process.env.NODE_ENV === 'development'
-      ? err.message
-      : 'Server error',
-  });
+  const statusCode = err.statusCode || err.status || 500;
+  const message = statusCode >= 500 && process.env.NODE_ENV !== 'development'
+    ? 'Server error'
+    : (err.message || 'Server error');
+
+  return handleError(res, statusCode, message, err);
 });
 
 // =====================================================
