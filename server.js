@@ -47,6 +47,7 @@ const termsRoutes = require('./routes/terms');
 const pricingRoutes = require('./routes/pricing');
 const pricingRulesRoutes = require('./routes/pricingRules');
 const pricingGroupsRoutes = require('./routes/pricingGroups');
+const storefrontRoutes = require('./routes/storefront');
 
 const app = express();
 const httpServer = http.createServer(app);
@@ -198,6 +199,7 @@ app.get('/api/health', async (req, res) => {
 app.use('/api', apiRateLimiter);
 
 app.use('/api/auth', authRoutes);
+app.use('/api/v1/storefront', storefrontRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/payments', paymentRoutes);
