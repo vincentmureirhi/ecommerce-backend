@@ -189,6 +189,30 @@ app.use((req, res, next) => {
 // HEALTH CHECK
 // =====================================================
 
+app.get('/', (req, res) => {
+  res.status(200).json({
+    success: true,
+    service: 'XPOSE Distributors API',
+    status: 'online',
+    health: '/api/health',
+    requestId: req.requestId,
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    success: true,
+    service: 'XPOSE Distributors API',
+    status: 'online',
+    health: '/api/health',
+    requestId: req.requestId,
+  });
+});
+
+app.get('/favicon.ico', (req, res) => {
+  res.status(204).end();
+});
+
 app.get('/api/health', async (req, res) => {
   try {
     const result = await pool.query('SELECT NOW()');

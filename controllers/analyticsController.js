@@ -256,7 +256,21 @@ const getDashboardOverview = async (req, res) => {
               THEN COALESCE(p.current_stock, 0) * COALESCE(p.cost_price, 0)
               ELSE 0
             END
-          ), 0)::numeric(14,2) AS dead_stock_value
+          ), 0)::numeric(14,2) AS dead_stock_value,
+          COUNT(*) FILTER (WHERE p.expiry_date IS NULL)::int AS missing_expiry,
+          COUNT(*) FILTER (WHERE p.expiry_date < CURRENT_DATE)::int AS expired,
+          COUNT(*) FILTER (
+            WHERE p.expiry_date >= CURRENT_DATE
+              AND p.expiry_date <= CURRENT_DATE + INTERVAL '30 days'
+          )::int AS expiry_critical,
+          COUNT(*) FILTER (
+            WHERE p.expiry_date > CURRENT_DATE + INTERVAL '30 days'
+              AND p.expiry_date <= CURRENT_DATE + INTERVAL '90 days'
+          )::int AS expiry_warning,
+          COUNT(*) FILTER (
+            WHERE p.expiry_date > CURRENT_DATE + INTERVAL '90 days'
+              AND p.expiry_date <= CURRENT_DATE + INTERVAL '210 days'
+          )::int AS expiry_watch
         FROM products p
         LEFT JOIN product_sales ps ON ps.id = p.id
         WHERE COALESCE(p.is_active, TRUE) = TRUE
@@ -473,6 +487,11 @@ const getDashboardOverview = async (req, res) => {
       slow_moving: toInt(stock.slow_moving),
       dead_stock: toInt(stock.dead_stock),
       dead_stock_value: Math.round(toNumber(stock.dead_stock_value)),
+      expiry_watch: toInt(stock.expiry_watch) + toInt(stock.expiry_warning) + toInt(stock.expiry_critical),
+      expiry_warning: toInt(stock.expiry_warning),
+      expiry_critical: toInt(stock.expiry_critical),
+      expired: toInt(stock.expired),
+      missing_expiry: toInt(stock.missing_expiry),
       total_skus: toInt(stock.total_skus),
       total_units_in_stock: toInt(stock.total_units_in_stock),
       stock_value: toNumber(stock.stock_value),
@@ -521,6 +540,24 @@ const getDashboardOverview = async (req, res) => {
         severity: 'warning',
         message: `${inventoryIntelligence.reorder_now + inventoryIntelligence.low_stock} SKUs need stock attention`,
         action: 'Review reorder list',
+        link: '/inventory',
+      });
+    }
+    if (inventoryIntelligence.expired > 0) {
+      alerts.push({
+        type: 'expired-stock',
+        severity: 'error',
+        message: `${inventoryIntelligence.expired} SKUs are already expired`,
+        action: 'Open expiry queue',
+        link: '/inventory',
+      });
+    }
+    if (inventoryIntelligence.expiry_critical > 0 || inventoryIntelligence.expiry_warning > 0) {
+      alerts.push({
+        type: 'expiry-risk',
+        severity: 'warning',
+        message: `${inventoryIntelligence.expiry_critical + inventoryIntelligence.expiry_warning} SKUs expire inside 90 days`,
+        action: 'Review expiry risk',
         link: '/inventory',
       });
     }
@@ -938,51 +975,50 @@ const getPaymentHealth = async (req, res) => {
   try {
     const { filter = '30days' } = req.query;
     const { startDate, endDate } = getDateRange(filter);
+    const paidStatuses = ['completed', 'manually_resolved'];
+    const failedStatuses = ['failed', 'cancelled', 'timeout'];
+    const openPaymentStatuses = ['initiated', 'pending'];
 
-    // Total payments in period
-    const totalPayments = await pool.query(
-      `SELECT COUNT(*) as total FROM payments
-       WHERE created_at >= $1 AND created_at <= $2`,
-      [startDate, endDate]
+    const stats = await pool.query(
+      `
+      SELECT
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE LOWER(status) = ANY($3::text[]))::int AS successful,
+        COUNT(*) FILTER (WHERE LOWER(status) = ANY($4::text[]))::int AS failed,
+        COUNT(*) FILTER (WHERE LOWER(status) = ANY($5::text[]))::int AS pending,
+        COALESCE(SUM(CASE WHEN LOWER(status) = ANY($3::text[]) THEN COALESCE(received_amount, amount, 0) ELSE 0 END), 0)::numeric(14,2) AS collected
+      FROM payments
+      WHERE created_at >= $1
+        AND created_at <= $2
+      `,
+      [startDate, endDate, paidStatuses, failedStatuses, openPaymentStatuses]
     );
 
-    // Successful payments
-    const successfulPayments = await pool.query(
-      `SELECT COUNT(*) as total FROM payments
-       WHERE status = 'completed' AND created_at >= $1 AND created_at <= $2`,
-      [startDate, endDate]
-    );
-
-    // Failed payments
-    const failedPayments = await pool.query(
-      `SELECT COUNT(*) as total FROM payments
-       WHERE status = 'failed' AND created_at >= $1 AND created_at <= $2`,
-      [startDate, endDate]
-    );
-
-    // Pending payments
-    const pendingPayments = await pool.query(
-      `SELECT COUNT(*) as total FROM payments
-       WHERE status = 'pending' AND created_at >= $1 AND created_at <= $2`,
-      [startDate, endDate]
-    );
-
-    // Pending payments older than 10 minutes
     const oldPending = await pool.query(
-      `SELECT COUNT(*) as total FROM payments
-       WHERE status = 'pending' AND created_at <= NOW() - INTERVAL '10 minutes'`
+      `
+      SELECT COUNT(*)::int AS total
+      FROM payments
+      WHERE LOWER(status) = ANY($1::text[])
+        AND created_at <= NOW() - INTERVAL '10 minutes'
+      `,
+      [openPaymentStatuses]
     );
 
-    // Unmatched payments
     const unmatched = await pool.query(
-      `SELECT COUNT(*) as total FROM payments
-       WHERE order_id IS NULL AND created_at >= $1 AND created_at <= $2`,
+      `
+      SELECT COUNT(*)::int AS total
+      FROM payments
+      WHERE order_id IS NULL
+        AND created_at >= $1
+        AND created_at <= $2
+      `,
       [startDate, endDate]
     );
 
-    const total = parseInt(totalPayments.rows[0].total) || 0;
-    const successful = parseInt(successfulPayments.rows[0].total) || 0;
-    const failed = parseInt(failedPayments.rows[0].total) || 0;
+    const total = toInt(stats.rows[0]?.total);
+    const successful = toInt(stats.rows[0]?.successful);
+    const failed = toInt(stats.rows[0]?.failed);
+    const pending = toInt(stats.rows[0]?.pending);
 
     const data = {
       success_rate: total > 0 ? Math.round((successful / total) * 100) : 0,
@@ -991,6 +1027,9 @@ const getPaymentHealth = async (req, res) => {
       unmatched: parseInt(unmatched.rows[0].total) || 0,
       total_payments: total,
       successful_payments: successful,
+      failed_payments: failed,
+      pending_payments: pending,
+      collected_amount: Math.round(toNumber(stats.rows[0]?.collected)),
     };
 
     console.log('✅ Payment health retrieved:', data);
@@ -1018,7 +1057,7 @@ const getRecentActivity = async (req, res) => {
     const paymentsResult = await pool.query(
       `SELECT 'payment' as type, 'Payment confirmed' as message,
               created_at as timestamp FROM payments
-       WHERE status = 'completed' ORDER BY created_at DESC LIMIT $1`,
+       WHERE LOWER(status) IN ('completed', 'manually_resolved') ORDER BY created_at DESC LIMIT $1`,
       [Math.floor(limit / 3)]
     );
 
@@ -1099,11 +1138,41 @@ const getInventoryIntelligence = async (req, res) => {
        )`
     );
 
+    const expiry = await pool.query(
+      `
+      SELECT
+        COUNT(*) FILTER (WHERE expiry_date IS NULL)::int AS missing_expiry,
+        COUNT(*) FILTER (WHERE expiry_date < CURRENT_DATE)::int AS expired,
+        COUNT(*) FILTER (
+          WHERE expiry_date >= CURRENT_DATE
+            AND expiry_date <= CURRENT_DATE + INTERVAL '30 days'
+        )::int AS expiry_critical,
+        COUNT(*) FILTER (
+          WHERE expiry_date > CURRENT_DATE + INTERVAL '30 days'
+            AND expiry_date <= CURRENT_DATE + INTERVAL '90 days'
+        )::int AS expiry_warning,
+        COUNT(*) FILTER (
+          WHERE expiry_date > CURRENT_DATE + INTERVAL '90 days'
+            AND expiry_date <= CURRENT_DATE + INTERVAL '210 days'
+        )::int AS expiry_watch
+      FROM products
+      WHERE COALESCE(is_active, TRUE) = TRUE
+      `
+    );
+
     const data = {
       low_stock: parseInt(lowStock.rows[0].total) || 0,
       out_of_stock: parseInt(outOfStock.rows[0].total) || 0,
       fast_moving: fastMoving.rows.length || 0,
       slow_moving: parseInt(slowMoving.rows[0].total) || 0,
+      expiry_watch:
+        toInt(expiry.rows[0]?.expiry_watch) +
+        toInt(expiry.rows[0]?.expiry_warning) +
+        toInt(expiry.rows[0]?.expiry_critical),
+      expiry_warning: toInt(expiry.rows[0]?.expiry_warning),
+      expiry_critical: toInt(expiry.rows[0]?.expiry_critical),
+      expired: toInt(expiry.rows[0]?.expired),
+      missing_expiry: toInt(expiry.rows[0]?.missing_expiry),
     };
 
     console.log('✅ Inventory intelligence retrieved:', data);
