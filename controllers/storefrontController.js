@@ -69,22 +69,32 @@ function buildPublicProductFilters(query, params) {
   }
 
   const stock = String(query.stock || '').toLowerCase();
+  const effectiveStockExpression = `
+    CASE
+      WHEN COALESCE(p.stock_source, 'product') = 'pool'
+        THEN COALESCE(sp.total_stock, 0)
+      ELSE COALESCE(p.current_stock, 0)
+    END
+  `;
   if (stock === 'limited') {
     where.push(`COALESCE(NULLIF(p.stock_status_override, ''), CASE
-      WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
-      WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, 10), 10) THEN 'limited_stock'
+      WHEN COALESCE(p.stock_source, 'product') = 'pool' AND NULLIF(sp.stock_status_override, '') IS NOT NULL THEN sp.stock_status_override
+      WHEN ${effectiveStockExpression} <= 0 THEN 'out_of_stock'
+      WHEN ${effectiveStockExpression} <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, sp.reorder_level, 10), 10) THEN 'limited_stock'
       ELSE 'in_stock'
     END) = 'limited_stock'`);
   } else if (stock === 'ready' || stock === 'in_stock') {
     where.push(`COALESCE(NULLIF(p.stock_status_override, ''), CASE
-      WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
-      WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, 10), 10) THEN 'limited_stock'
+      WHEN COALESCE(p.stock_source, 'product') = 'pool' AND NULLIF(sp.stock_status_override, '') IS NOT NULL THEN sp.stock_status_override
+      WHEN ${effectiveStockExpression} <= 0 THEN 'out_of_stock'
+      WHEN ${effectiveStockExpression} <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, sp.reorder_level, 10), 10) THEN 'limited_stock'
       ELSE 'in_stock'
     END) <> 'out_of_stock'`);
   } else if (stock === 'out_of_stock') {
     where.push(`COALESCE(NULLIF(p.stock_status_override, ''), CASE
-      WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
-      WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, 10), 10) THEN 'limited_stock'
+      WHEN COALESCE(p.stock_source, 'product') = 'pool' AND NULLIF(sp.stock_status_override, '') IS NOT NULL THEN sp.stock_status_override
+      WHEN ${effectiveStockExpression} <= 0 THEN 'out_of_stock'
+      WHEN ${effectiveStockExpression} <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, sp.reorder_level, 10), 10) THEN 'limited_stock'
       ELSE 'in_stock'
     END) = 'out_of_stock'`);
   }
@@ -109,7 +119,13 @@ function getSortClause(sort, priceExpression) {
         CASE
           WHEN active_flash_sale.id IS NOT NULL THEN 0
           WHEN COALESCE(NULLIF(p.stock_status_override, ''), '') = 'limited_stock' THEN 1
-          WHEN COALESCE(p.current_stock, 0) > 0 THEN 2
+          WHEN (
+            CASE
+              WHEN COALESCE(p.stock_source, 'product') = 'pool'
+                THEN COALESCE(sp.total_stock, 0)
+              ELSE COALESCE(p.current_stock, 0)
+            END
+          ) > 0 THEN 2
           ELSE 3
         END ASC,
         COALESCE(p.updated_at, p.created_at) DESC NULLS LAST,
@@ -122,6 +138,7 @@ const productFromClause = `
   FROM products p
   LEFT JOIN categories c ON c.id = p.category_id
   LEFT JOIN departments d ON d.id = p.department_id
+  LEFT JOIN inventory_stock_pools sp ON sp.id = p.stock_pool_id
   LEFT JOIN vendors v ON v.id = p.vendor_id
   LEFT JOIN LATERAL (
     SELECT
@@ -152,9 +169,39 @@ const productFromClause = `
 const productSelect = `
   SELECT
     p.*,
+    p.current_stock AS product_current_stock,
+    (CASE
+      WHEN COALESCE(p.stock_source, 'product') = 'pool'
+        THEN COALESCE(sp.total_stock, 0)
+      ELSE COALESCE(p.current_stock, 0)
+    END)::INT AS current_stock,
+    (CASE
+      WHEN COALESCE(p.stock_source, 'product') = 'pool'
+        THEN COALESCE(sp.total_stock, 0)
+      ELSE COALESCE(p.current_stock, 0)
+    END)::INT AS stock,
+    COALESCE(p.stock_source, 'product') AS stock_source,
+    sp.id AS stock_pool_id,
+    sp.name AS stock_pool_name,
+    sp.sku AS stock_pool_sku,
+    COALESCE(sp.total_stock, 0)::INT AS stock_pool_total_stock,
+    p.stock_pool_note,
     COALESCE(NULLIF(p.stock_status_override, ''), CASE
-      WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
-      WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, 10), 10) THEN 'limited_stock'
+      WHEN COALESCE(p.stock_source, 'product') = 'pool' AND NULLIF(sp.stock_status_override, '') IS NOT NULL THEN sp.stock_status_override
+      WHEN (
+        CASE
+          WHEN COALESCE(p.stock_source, 'product') = 'pool'
+            THEN COALESCE(sp.total_stock, 0)
+          ELSE COALESCE(p.current_stock, 0)
+        END
+      ) <= 0 THEN 'out_of_stock'
+      WHEN (
+        CASE
+          WHEN COALESCE(p.stock_source, 'product') = 'pool'
+            THEN COALESCE(sp.total_stock, 0)
+          ELSE COALESCE(p.current_stock, 0)
+        END
+      ) <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, sp.reorder_level, 10), 10) THEN 'limited_stock'
       ELSE 'in_stock'
     END) AS stock_status,
     c.name AS category_name,
@@ -290,12 +337,24 @@ async function listStorefrontCategories(req, res) {
       SELECT
         c.*,
         COUNT(p.id)::int AS product_count,
-        COALESCE(SUM(COALESCE(p.current_stock, 0)), 0)::int AS total_stock
+        COALESCE(SUM(CASE
+          WHEN COALESCE(p.stock_source, 'product') = 'pool'
+            THEN COALESCE(sp.total_stock, 0)
+          ELSE COALESCE(p.current_stock, 0)
+        END), 0)::int AS total_stock
       FROM categories c
       LEFT JOIN products p
         ON p.category_id = c.id
        AND COALESCE(p.is_active, TRUE) = TRUE
-       AND COALESCE(p.current_stock, 0) > 0
+      LEFT JOIN inventory_stock_pools sp ON sp.id = p.stock_pool_id
+      WHERE (
+        p.id IS NULL
+        OR CASE
+          WHEN COALESCE(p.stock_source, 'product') = 'pool'
+            THEN COALESCE(sp.total_stock, 0)
+          ELSE COALESCE(p.current_stock, 0)
+        END > 0
+      )
       GROUP BY c.id
       HAVING COUNT(p.id) > 0
       ORDER BY c.name ASC

@@ -41,6 +41,136 @@ function getExpiryStatus(daysToExpiry) {
   return 'healthy';
 }
 
+function toNonNegativeInt(value, field, fallback = null) {
+  const source = value === undefined || value === null || value === '' ? fallback : value;
+  const parsed = Number(source);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${field} must be a non-negative integer`);
+  }
+  return parsed;
+}
+
+function cleanPoolText(value, field, { required = false } = {}) {
+  const text = String(value || '').trim();
+  if (required && !text) {
+    throw new Error(`${field} is required`);
+  }
+  return text || null;
+}
+
+const STOCK_POOL_STATUS_OPTIONS = new Set(['in_stock', 'limited_stock', 'out_of_stock']);
+
+function cleanPoolStatus(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return null;
+  if (!STOCK_POOL_STATUS_OPTIONS.has(text)) {
+    throw new Error('stock_status_override must be in_stock, limited_stock, or out_of_stock');
+  }
+  return text;
+}
+
+const listStockPools = async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        sp.*,
+        COUNT(p.id)::int AS linked_product_count,
+        COALESCE(NULLIF(sp.stock_status_override, ''), CASE
+          WHEN COALESCE(sp.total_stock, 0) <= 0 THEN 'out_of_stock'
+          WHEN COALESCE(sp.total_stock, 0) <= GREATEST(COALESCE(sp.reorder_level, 0), 1) THEN 'limited_stock'
+          ELSE 'in_stock'
+        END) AS stock_status
+      FROM inventory_stock_pools sp
+      LEFT JOIN products p
+        ON p.stock_pool_id = sp.id
+       AND COALESCE(p.stock_source, 'product') = 'pool'
+      GROUP BY sp.id
+      ORDER BY sp.is_active DESC, sp.name ASC
+    `);
+
+    return handleSuccess(res, 200, 'Stock pools retrieved', result.rows);
+  } catch (err) {
+    console.error('List stock pools error:', err);
+    return handleError(res, 500, 'Failed to retrieve stock pools', err);
+  }
+};
+
+const createStockPool = async (req, res) => {
+  try {
+    const name = cleanPoolText(req.body.name, 'name', { required: true });
+    const sku = cleanPoolText(req.body.sku, 'sku');
+    const description = cleanPoolText(req.body.description, 'description');
+    const totalStock = toNonNegativeInt(req.body.total_stock, 'total_stock', 0);
+    const reorderLevel = toNonNegativeInt(req.body.reorder_level, 'reorder_level', 0);
+    const stockStatusOverride = cleanPoolStatus(req.body.stock_status_override);
+    const isActive = req.body.is_active !== false;
+
+    const result = await pool.query(
+      `
+      INSERT INTO inventory_stock_pools (
+        name, sku, description, total_stock, reorder_level, stock_status_override, is_active
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING *
+      `,
+      [name, sku, description, totalStock, reorderLevel, stockStatusOverride, isActive]
+    );
+
+    return handleSuccess(res, 201, 'Stock pool created', result.rows[0]);
+  } catch (err) {
+    if (/required|must be|invalid|duplicate key|unique/i.test(String(err.message || ''))) {
+      return handleError(res, 400, err.message, err);
+    }
+    console.error('Create stock pool error:', err);
+    return handleError(res, 500, 'Failed to create stock pool', err);
+  }
+};
+
+const updateStockPool = async (req, res) => {
+  try {
+    const id = toNonNegativeInt(req.params.id, 'id');
+    if (id <= 0) return handleError(res, 400, 'id must be greater than 0');
+
+    const name = cleanPoolText(req.body.name, 'name', { required: true });
+    const sku = cleanPoolText(req.body.sku, 'sku');
+    const description = cleanPoolText(req.body.description, 'description');
+    const totalStock = toNonNegativeInt(req.body.total_stock, 'total_stock', 0);
+    const reorderLevel = toNonNegativeInt(req.body.reorder_level, 'reorder_level', 0);
+    const stockStatusOverride = cleanPoolStatus(req.body.stock_status_override);
+    const isActive = req.body.is_active !== false;
+
+    const result = await pool.query(
+      `
+      UPDATE inventory_stock_pools
+      SET
+        name = $1,
+        sku = $2,
+        description = $3,
+        total_stock = $4,
+        reorder_level = $5,
+        stock_status_override = $6,
+        is_active = $7,
+        updated_at = NOW()
+      WHERE id = $8
+      RETURNING *
+      `,
+      [name, sku, description, totalStock, reorderLevel, stockStatusOverride, isActive, id]
+    );
+
+    if (result.rowCount === 0) {
+      return handleError(res, 404, 'Stock pool not found');
+    }
+
+    return handleSuccess(res, 200, 'Stock pool updated', result.rows[0]);
+  } catch (err) {
+    if (/required|must be|invalid|duplicate key|unique/i.test(String(err.message || ''))) {
+      return handleError(res, 400, err.message, err);
+    }
+    console.error('Update stock pool error:', err);
+    return handleError(res, 500, 'Failed to update stock pool', err);
+  }
+};
+
 const getInventoryAnalytics = async (req, res) => {
   try {
     const { profit_type = 'retail' } = req.query;
@@ -101,8 +231,19 @@ const getInventoryAnalytics = async (req, res) => {
         p.id,
         p.name,
         p.sku,
-        COALESCE(p.current_stock, 0) AS current_stock,
-        COALESCE(p.reorder_level, 0) AS reorder_level,
+        COALESCE(p.current_stock, 0) AS product_current_stock,
+        (CASE
+          WHEN COALESCE(p.stock_source, 'product') = 'pool'
+            THEN COALESCE(sp.total_stock, 0)
+          ELSE COALESCE(p.current_stock, 0)
+        END)::int AS current_stock,
+        COALESCE(p.stock_source, 'product') AS stock_source,
+        sp.id AS stock_pool_id,
+        sp.name AS stock_pool_name,
+        sp.sku AS stock_pool_sku,
+        COALESCE(sp.total_stock, 0)::int AS stock_pool_total_stock,
+        p.stock_pool_note,
+        COALESCE(p.reorder_level, sp.reorder_level, 0) AS reorder_level,
         COALESCE(p.cost_price, 0) AS cost_price,
         COALESCE(p.retail_price, 0) AS retail_price,
         COALESCE(p.wholesale_price, 0) AS wholesale_price,
@@ -134,6 +275,7 @@ const getInventoryAnalytics = async (req, res) => {
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN departments d ON d.id = p.department_id
+      LEFT JOIN inventory_stock_pools sp ON sp.id = p.stock_pool_id
       LEFT JOIN sales_7d s7 ON s7.product_id = p.id
       LEFT JOIN sales_30d s30 ON s30.product_id = p.id
       LEFT JOIN all_sales a ON a.product_id = p.id
@@ -232,6 +374,13 @@ const getInventoryAnalytics = async (req, res) => {
         supplier_id: p.supplier_id,
         supplier_name: p.supplier_name || 'Unassigned',
         current_stock: currentStock,
+        product_current_stock: toNumber(p.product_current_stock),
+        stock_source: p.stock_source || 'product',
+        stock_pool_id: p.stock_pool_id || null,
+        stock_pool_name: p.stock_pool_name || null,
+        stock_pool_sku: p.stock_pool_sku || null,
+        stock_pool_total_stock: toNumber(p.stock_pool_total_stock),
+        stock_pool_note: p.stock_pool_note || null,
         reorder_level: reorderLevel,
         cost_price: costPrice.toFixed(2),
         retail_price: retailPrice.toFixed(2),
@@ -337,4 +486,7 @@ const updateInventoryReorderLevel = async (req, res) => {
 module.exports = {
   getInventoryAnalytics,
   updateInventoryReorderLevel,
+  listStockPools,
+  createStockPool,
+  updateStockPool,
 };

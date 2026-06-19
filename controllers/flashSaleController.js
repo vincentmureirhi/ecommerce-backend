@@ -59,13 +59,21 @@ const getActiveFlashSales = async (req, res) => {
               'image_url', p.image_url,
               'category_name', c.name,
               'is_active', COALESCE(p.is_active, TRUE),
-              'current_stock', COALESCE(p.current_stock, 0)::INT,
-              'stock', COALESCE(p.current_stock, 0)::INT,
+              'product_current_stock', COALESCE(p.current_stock, 0)::INT,
+              'current_stock', (CASE WHEN COALESCE(p.stock_source, 'product') = 'pool' THEN COALESCE(sp.total_stock, 0) ELSE COALESCE(p.current_stock, 0) END)::INT,
+              'stock', (CASE WHEN COALESCE(p.stock_source, 'product') = 'pool' THEN COALESCE(sp.total_stock, 0) ELSE COALESCE(p.current_stock, 0) END)::INT,
+              'stock_source', COALESCE(p.stock_source, 'product'),
+              'stock_pool_id', sp.id,
+              'stock_pool_name', sp.name,
+              'stock_pool_sku', sp.sku,
+              'stock_pool_total_stock', COALESCE(sp.total_stock, 0)::INT,
+              'stock_pool_note', p.stock_pool_note,
               'stock_status_override', NULLIF(p.stock_status_override, ''),
               'stock_status',
               COALESCE(NULLIF(p.stock_status_override, ''), CASE
-                WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
-                WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), 10) THEN 'limited_stock'
+                WHEN COALESCE(p.stock_source, 'product') = 'pool' AND NULLIF(sp.stock_status_override, '') IS NOT NULL THEN sp.stock_status_override
+                WHEN (CASE WHEN COALESCE(p.stock_source, 'product') = 'pool' THEN COALESCE(sp.total_stock, 0) ELSE COALESCE(p.current_stock, 0) END) <= 0 THEN 'out_of_stock'
+                WHEN (CASE WHEN COALESCE(p.stock_source, 'product') = 'pool' THEN COALESCE(sp.total_stock, 0) ELSE COALESCE(p.current_stock, 0) END) <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, sp.reorder_level, 10), 10) THEN 'limited_stock'
                 ELSE 'in_stock'
               END),
               'min_order_qty', COALESCE(p.min_order_qty, 1)::INT,
@@ -107,6 +115,9 @@ const getActiveFlashSales = async (req, res) => {
 
       LEFT JOIN categories c
         ON c.id = p.category_id
+
+      LEFT JOIN inventory_stock_pools sp
+        ON sp.id = p.stock_pool_id
 
       WHERE
         fs.is_active = TRUE
@@ -166,13 +177,21 @@ const getPublicFlashSaleFeed = async (req, res) => {
               'image_url', p.image_url,
               'category_name', c.name,
               'is_active', COALESCE(p.is_active, TRUE),
-              'current_stock', COALESCE(p.current_stock, 0)::INT,
-              'stock', COALESCE(p.current_stock, 0)::INT,
+              'product_current_stock', COALESCE(p.current_stock, 0)::INT,
+              'current_stock', (CASE WHEN COALESCE(p.stock_source, 'product') = 'pool' THEN COALESCE(sp.total_stock, 0) ELSE COALESCE(p.current_stock, 0) END)::INT,
+              'stock', (CASE WHEN COALESCE(p.stock_source, 'product') = 'pool' THEN COALESCE(sp.total_stock, 0) ELSE COALESCE(p.current_stock, 0) END)::INT,
+              'stock_source', COALESCE(p.stock_source, 'product'),
+              'stock_pool_id', sp.id,
+              'stock_pool_name', sp.name,
+              'stock_pool_sku', sp.sku,
+              'stock_pool_total_stock', COALESCE(sp.total_stock, 0)::INT,
+              'stock_pool_note', p.stock_pool_note,
               'stock_status_override', NULLIF(p.stock_status_override, ''),
               'stock_status',
               COALESCE(NULLIF(p.stock_status_override, ''), CASE
-                WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
-                WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), 10) THEN 'limited_stock'
+                WHEN COALESCE(p.stock_source, 'product') = 'pool' AND NULLIF(sp.stock_status_override, '') IS NOT NULL THEN sp.stock_status_override
+                WHEN (CASE WHEN COALESCE(p.stock_source, 'product') = 'pool' THEN COALESCE(sp.total_stock, 0) ELSE COALESCE(p.current_stock, 0) END) <= 0 THEN 'out_of_stock'
+                WHEN (CASE WHEN COALESCE(p.stock_source, 'product') = 'pool' THEN COALESCE(sp.total_stock, 0) ELSE COALESCE(p.current_stock, 0) END) <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, sp.reorder_level, 10), 10) THEN 'limited_stock'
                 ELSE 'in_stock'
               END),
               'min_order_qty', COALESCE(p.min_order_qty, 1)::INT,
@@ -219,6 +238,9 @@ const getPublicFlashSaleFeed = async (req, res) => {
 
       LEFT JOIN categories c
         ON c.id = p.category_id
+
+      LEFT JOIN inventory_stock_pools sp
+        ON sp.id = p.stock_pool_id
 
       WHERE
         fs.is_active = TRUE
@@ -782,12 +804,20 @@ const getFlashSaleProducts = async (req, res) => {
         p.retail_price::FLOAT AS price,
         p.image_url,
         c.name AS category_name,
-        COALESCE(p.current_stock, 0)::INT AS current_stock,
-        COALESCE(p.current_stock, 0)::INT AS stock,
+        COALESCE(p.current_stock, 0)::INT AS product_current_stock,
+        (CASE WHEN COALESCE(p.stock_source, 'product') = 'pool' THEN COALESCE(sp.total_stock, 0) ELSE COALESCE(p.current_stock, 0) END)::INT AS current_stock,
+        (CASE WHEN COALESCE(p.stock_source, 'product') = 'pool' THEN COALESCE(sp.total_stock, 0) ELSE COALESCE(p.current_stock, 0) END)::INT AS stock,
+        COALESCE(p.stock_source, 'product') AS stock_source,
+        sp.id AS stock_pool_id,
+        sp.name AS stock_pool_name,
+        sp.sku AS stock_pool_sku,
+        COALESCE(sp.total_stock, 0)::INT AS stock_pool_total_stock,
+        p.stock_pool_note,
         NULLIF(p.stock_status_override, '') AS stock_status_override,
         COALESCE(NULLIF(p.stock_status_override, ''), CASE
-          WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
-          WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), 10) THEN 'limited_stock'
+          WHEN COALESCE(p.stock_source, 'product') = 'pool' AND NULLIF(sp.stock_status_override, '') IS NOT NULL THEN sp.stock_status_override
+          WHEN (CASE WHEN COALESCE(p.stock_source, 'product') = 'pool' THEN COALESCE(sp.total_stock, 0) ELSE COALESCE(p.current_stock, 0) END) <= 0 THEN 'out_of_stock'
+          WHEN (CASE WHEN COALESCE(p.stock_source, 'product') = 'pool' THEN COALESCE(sp.total_stock, 0) ELSE COALESCE(p.current_stock, 0) END) <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, sp.reorder_level, 10), 10) THEN 'limited_stock'
           ELSE 'in_stock'
         END) AS stock_status,
         COALESCE(p.min_order_qty, 1)::INT AS min_order_qty,
@@ -823,6 +853,9 @@ const getFlashSaleProducts = async (req, res) => {
 
       LEFT JOIN categories c
         ON c.id = p.category_id
+
+      LEFT JOIN inventory_stock_pools sp
+        ON sp.id = p.stock_pool_id
 
       WHERE
         fsp.flash_sale_id = $1
@@ -899,12 +932,20 @@ const getActiveFlashSaleProducts = async (
         p.retail_price::FLOAT AS price,
         p.image_url,
         c.name AS category_name,
-        COALESCE(p.current_stock, 0)::INT AS current_stock,
-        COALESCE(p.current_stock, 0)::INT AS stock,
+        COALESCE(p.current_stock, 0)::INT AS product_current_stock,
+        (CASE WHEN COALESCE(p.stock_source, 'product') = 'pool' THEN COALESCE(sp.total_stock, 0) ELSE COALESCE(p.current_stock, 0) END)::INT AS current_stock,
+        (CASE WHEN COALESCE(p.stock_source, 'product') = 'pool' THEN COALESCE(sp.total_stock, 0) ELSE COALESCE(p.current_stock, 0) END)::INT AS stock,
+        COALESCE(p.stock_source, 'product') AS stock_source,
+        sp.id AS stock_pool_id,
+        sp.name AS stock_pool_name,
+        sp.sku AS stock_pool_sku,
+        COALESCE(sp.total_stock, 0)::INT AS stock_pool_total_stock,
+        p.stock_pool_note,
         NULLIF(p.stock_status_override, '') AS stock_status_override,
         COALESCE(NULLIF(p.stock_status_override, ''), CASE
-          WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
-          WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), 10) THEN 'limited_stock'
+          WHEN COALESCE(p.stock_source, 'product') = 'pool' AND NULLIF(sp.stock_status_override, '') IS NOT NULL THEN sp.stock_status_override
+          WHEN (CASE WHEN COALESCE(p.stock_source, 'product') = 'pool' THEN COALESCE(sp.total_stock, 0) ELSE COALESCE(p.current_stock, 0) END) <= 0 THEN 'out_of_stock'
+          WHEN (CASE WHEN COALESCE(p.stock_source, 'product') = 'pool' THEN COALESCE(sp.total_stock, 0) ELSE COALESCE(p.current_stock, 0) END) <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, sp.reorder_level, 10), 10) THEN 'limited_stock'
           ELSE 'in_stock'
         END) AS stock_status,
         COALESCE(p.min_order_qty, 1)::INT AS min_order_qty,
@@ -940,6 +981,9 @@ const getActiveFlashSaleProducts = async (
 
       LEFT JOIN categories c
         ON c.id = p.category_id
+
+      LEFT JOIN inventory_stock_pools sp
+        ON sp.id = p.stock_pool_id
 
       WHERE
         fsp.flash_sale_id = $1

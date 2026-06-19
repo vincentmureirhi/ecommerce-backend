@@ -88,6 +88,59 @@ async function reserveStockForOrder(client, items) {
 
   for (const item of items) {
     const quantity = Number(item.quantity || 0);
+    const stockSource = String(item.stock_source || 'product').toLowerCase();
+
+    if (stockSource === 'pool') {
+      const poolId = Number(item.stock_pool_id || 0);
+      if (!Number.isInteger(poolId) || poolId <= 0) {
+        throw new OrderValidationError(
+          `${item.product_name || `Product ${item.product_id}`} is linked to pooled stock but has no valid stock pool.`
+        );
+      }
+
+      const result = await client.query(
+        `
+        UPDATE inventory_stock_pools
+        SET total_stock = COALESCE(total_stock, 0) - $1,
+            updated_at = NOW()
+        WHERE id = $2
+          AND COALESCE(is_active, TRUE) = TRUE
+          AND COALESCE(total_stock, 0) >= $1
+        RETURNING id, name, total_stock
+        `,
+        [quantity, poolId]
+      );
+
+      if (result.rowCount === 0) {
+        const poolResult = await client.query(
+          `
+          SELECT id, name, COALESCE(total_stock, 0) AS total_stock
+          FROM inventory_stock_pools
+          WHERE id = $1
+          `,
+          [poolId]
+        );
+        const row = poolResult.rows[0];
+        const available = Number(row?.total_stock || 0);
+        const poolName = row?.name || 'selected stock pool';
+        throw new OrderValidationError(
+          `${item.product_name || `Product ${item.product_id}`} uses ${poolName}, which has only ${available} unit${available === 1 ? '' : 's'} available. Reduce the quantity or restock the pool before selling.`
+        );
+      }
+
+      stockChanges.push({
+        product_id: item.product_id,
+        product_name: item.product_name || `Product ${item.product_id}`,
+        stock_source: 'pool',
+        stock_pool_id: result.rows[0].id,
+        stock_pool_name: result.rows[0].name,
+        quantity_sold: quantity,
+        remaining_stock: Number(result.rows[0].total_stock || 0),
+      });
+
+      continue;
+    }
+
     const result = await client.query(
       `
       UPDATE products
@@ -116,6 +169,7 @@ async function reserveStockForOrder(client, items) {
     stockChanges.push({
       product_id: result.rows[0].id,
       product_name: result.rows[0].name,
+      stock_source: 'product',
       quantity_sold: quantity,
       remaining_stock: Number(result.rows[0].current_stock || 0),
     });
@@ -753,6 +807,10 @@ async function loadPricingContext(client, productIds) {
       p.retail_price, p.wholesale_price, p.min_qty_wholesale,
       p.min_order_qty, p.order_qty_step, p.selling_unit_label,
       p.requires_manual_price, p.current_stock, p.pricing_rule_id,
+      COALESCE(p.stock_source, 'product') AS stock_source,
+      p.stock_pool_id,
+      sp.name AS stock_pool_name,
+      COALESCE(sp.total_stock, 0) AS stock_pool_total_stock,
       pr.rule_type      AS pricing_rule_type,
       pr.threshold_qty  AS pricing_rule_threshold_qty,
       pr.name           AS pricing_rule_name,
@@ -765,6 +823,8 @@ async function loadPricingContext(client, productIds) {
       active_flash_sale.end_date AS flash_sale_end_date,
       active_flash_sale.discounted_price AS flash_sale_discounted_price
     FROM products p
+    LEFT JOIN inventory_stock_pools sp
+      ON sp.id = p.stock_pool_id
     LEFT JOIN pricing_rules pr
       ON pr.id = p.pricing_rule_id AND pr.is_active = TRUE
     LEFT JOIN LATERAL (
@@ -1357,6 +1417,9 @@ const guestCheckout = async (req, res) => {
         price_source: priceSource,
 
         product_name: product.name,
+        stock_source: product.stock_source || 'product',
+        stock_pool_id: product.stock_pool_id || null,
+        stock_pool_name: product.stock_pool_name || null,
       });
     }
 
@@ -1733,6 +1796,9 @@ const createOrder = async (req, res) => {
         price_source: priceSource,
 
         product_name: product.name,
+        stock_source: product.stock_source || 'product',
+        stock_pool_id: product.stock_pool_id || null,
+        stock_pool_name: product.stock_pool_name || null,
       });
     }
 

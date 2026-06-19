@@ -79,6 +79,24 @@ function normalizeStockForStatus(currentStock, stockStatusOverride) {
   return currentStock;
 }
 
+const STOCK_SOURCE_OPTIONS = new Set(['product', 'pool']);
+
+function cleanStockSource(value) {
+  const text = String(value || 'product').trim().toLowerCase();
+  if (!STOCK_SOURCE_OPTIONS.has(text)) {
+    throw new Error('stock_source must be product or pool');
+  }
+  return text;
+}
+
+const effectiveStockExpression = `
+  CASE
+    WHEN COALESCE(p.stock_source, 'product') = 'pool'
+      THEN COALESCE(sp.total_stock, 0)
+    ELSE COALESCE(p.current_stock, 0)
+  END
+`;
+
 function buildAutoSkuThresholdRuleName(productName) {
   return `Wholesale threshold - ${productName}`;
 }
@@ -182,9 +200,19 @@ const getAllProducts = async (req, res) => {
     const r = await pool.query(`
       SELECT
         p.*,
+        p.current_stock AS product_current_stock,
+        (${effectiveStockExpression})::INT AS current_stock,
+        (${effectiveStockExpression})::INT AS stock,
+        COALESCE(p.stock_source, 'product') AS stock_source,
+        sp.id AS stock_pool_id,
+        sp.name AS stock_pool_name,
+        sp.sku AS stock_pool_sku,
+        COALESCE(sp.total_stock, 0)::INT AS stock_pool_total_stock,
+        p.stock_pool_note,
         COALESCE(NULLIF(p.stock_status_override, ''), CASE
-          WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
-          WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, 10), 10) THEN 'limited_stock'
+          WHEN COALESCE(p.stock_source, 'product') = 'pool' AND NULLIF(sp.stock_status_override, '') IS NOT NULL THEN sp.stock_status_override
+          WHEN ${effectiveStockExpression} <= 0 THEN 'out_of_stock'
+          WHEN ${effectiveStockExpression} <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, sp.reorder_level, 10), 10) THEN 'limited_stock'
           ELSE 'in_stock'
         END) AS stock_status,
         c.name AS category_name,
@@ -213,6 +241,7 @@ const getAllProducts = async (req, res) => {
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN departments d ON d.id = p.department_id
+      LEFT JOIN inventory_stock_pools sp ON sp.id = p.stock_pool_id
       LEFT JOIN vendors v ON v.id = p.vendor_id
       LEFT JOIN LATERAL (
         SELECT
@@ -274,9 +303,19 @@ const getProductById = async (req, res) => {
       `
       SELECT
         p.*,
+        p.current_stock AS product_current_stock,
+        (${effectiveStockExpression})::INT AS current_stock,
+        (${effectiveStockExpression})::INT AS stock,
+        COALESCE(p.stock_source, 'product') AS stock_source,
+        sp.id AS stock_pool_id,
+        sp.name AS stock_pool_name,
+        sp.sku AS stock_pool_sku,
+        COALESCE(sp.total_stock, 0)::INT AS stock_pool_total_stock,
+        p.stock_pool_note,
         COALESCE(NULLIF(p.stock_status_override, ''), CASE
-          WHEN COALESCE(p.current_stock, 0) <= 0 THEN 'out_of_stock'
-          WHEN COALESCE(p.current_stock, 0) <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, 10), 10) THEN 'limited_stock'
+          WHEN COALESCE(p.stock_source, 'product') = 'pool' AND NULLIF(sp.stock_status_override, '') IS NOT NULL THEN sp.stock_status_override
+          WHEN ${effectiveStockExpression} <= 0 THEN 'out_of_stock'
+          WHEN ${effectiveStockExpression} <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, sp.reorder_level, 10), 10) THEN 'limited_stock'
           ELSE 'in_stock'
         END) AS stock_status,
         c.name AS category_name,
@@ -320,6 +359,7 @@ const getProductById = async (req, res) => {
       FROM products p
       LEFT JOIN categories c ON c.id = p.category_id
       LEFT JOIN departments d ON d.id = p.department_id
+      LEFT JOIN inventory_stock_pools sp ON sp.id = p.stock_pool_id
       LEFT JOIN vendors v ON v.id = p.vendor_id
       LEFT JOIN LATERAL (
         SELECT
@@ -374,11 +414,18 @@ const createProduct = async (req, res) => {
     const stock_status_override = cleanStockStatusOverride(
       req.body.stock_status_override ?? req.body.stock_status
     );
+    const stock_source = cleanStockSource(req.body.stock_source);
+    const stock_pool_id = stock_source === 'pool'
+      ? toInt(req.body.stock_pool_id, 'stock_pool_id')
+      : null;
+    const stock_pool_note = cleanOptionalText(req.body.stock_pool_note);
     const expiry_date = cleanExpiryDate(req.body.expiry_date);
-    const current_stock = normalizeStockForStatus(
-      toInt(req.body.current_stock ?? 0, "current_stock"),
-      stock_status_override
-    );
+    const current_stock = stock_source === 'pool'
+      ? 0
+      : normalizeStockForStatus(
+          toInt(req.body.current_stock ?? 0, "current_stock"),
+          stock_status_override
+        );
     const requires_manual_price = Boolean(req.body.requires_manual_price);
 
     const image_url = req.body.image_url ? String(req.body.image_url).trim() : null;
@@ -413,6 +460,17 @@ const createProduct = async (req, res) => {
     client = await pool.connect();
     await client.query("BEGIN");
 
+    if (stock_source === 'pool') {
+      const poolCheck = await client.query(
+        `SELECT id FROM inventory_stock_pools WHERE id = $1 AND COALESCE(is_active, TRUE) = TRUE`,
+        [stock_pool_id]
+      );
+      if (poolCheck.rowCount === 0) {
+        await client.query("ROLLBACK");
+        return handleError(res, 400, "Selected stock pool does not exist or is inactive");
+      }
+    }
+
     let linkedPricingRuleId = pricing_rule_id;
     if (linkedPricingRuleId == null && hasWholesaleConfig) {
       linkedPricingRuleId = await createAutoSkuThresholdRule(client, name, min_qty_wholesale);
@@ -426,9 +484,10 @@ const createProduct = async (req, res) => {
         retail_price, wholesale_price, min_qty_wholesale,
         requires_manual_price, image_url, pricing_rule_id,
         min_order_qty, order_qty_step, selling_unit_label,
-        reorder_level, is_combo_eligible, is_active, expiry_date
+        reorder_level, is_combo_eligible, is_active, expiry_date,
+        stock_source, stock_pool_id, stock_pool_note
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
       RETURNING *
       `,
       [
@@ -454,6 +513,9 @@ const createProduct = async (req, res) => {
         is_combo_eligible,
         is_active,
         expiry_date,
+        stock_source,
+        stock_pool_id,
+        stock_pool_note,
       ]
     );
 
@@ -469,6 +531,8 @@ const createProduct = async (req, res) => {
         sku: r.rows[0].sku,
         category_id: r.rows[0].category_id,
         current_stock: r.rows[0].current_stock,
+        stock_source: r.rows[0].stock_source,
+        stock_pool_id: r.rows[0].stock_pool_id,
         stock_status_override: r.rows[0].stock_status_override,
         retail_price: r.rows[0].retail_price,
         wholesale_price: r.rows[0].wholesale_price,
@@ -510,11 +574,18 @@ const updateProduct = async (req, res) => {
     const stock_status_override = cleanStockStatusOverride(
       req.body.stock_status_override ?? req.body.stock_status
     );
+    const stock_source = cleanStockSource(req.body.stock_source);
+    const stock_pool_id = stock_source === 'pool'
+      ? toInt(req.body.stock_pool_id, 'stock_pool_id')
+      : null;
+    const stock_pool_note = cleanOptionalText(req.body.stock_pool_note);
     const expiry_date = cleanExpiryDate(req.body.expiry_date);
-    const current_stock = normalizeStockForStatus(
-      toInt(req.body.current_stock ?? 0, "current_stock"),
-      stock_status_override
-    );
+    const current_stock = stock_source === 'pool'
+      ? 0
+      : normalizeStockForStatus(
+          toInt(req.body.current_stock ?? 0, "current_stock"),
+          stock_status_override
+        );
     const requires_manual_price = Boolean(req.body.requires_manual_price);
 
     const image_url = req.body.image_url ? String(req.body.image_url).trim() : null;
@@ -555,6 +626,9 @@ const updateProduct = async (req, res) => {
         pricing_rule_id,
         current_stock,
         stock_status_override,
+        stock_source,
+        stock_pool_id,
+        stock_pool_note,
         retail_price,
         wholesale_price,
         cost_price,
@@ -569,6 +643,17 @@ const updateProduct = async (req, res) => {
     if (existingProduct.rowCount === 0) {
       await client.query("ROLLBACK");
       return handleError(res, 404, "Product not found");
+    }
+
+    if (stock_source === 'pool') {
+      const poolCheck = await client.query(
+        `SELECT id FROM inventory_stock_pools WHERE id = $1 AND COALESCE(is_active, TRUE) = TRUE`,
+        [stock_pool_id]
+      );
+      if (poolCheck.rowCount === 0) {
+        await client.query("ROLLBACK");
+        return handleError(res, 400, "Selected stock pool does not exist or is inactive");
+      }
     }
 
     let linkedPricingRuleId = hasExplicitPricingRuleId
@@ -627,8 +712,11 @@ const updateProduct = async (req, res) => {
         is_combo_eligible=$20,
         is_active=$21,
         expiry_date=$22,
+        stock_source=$23,
+        stock_pool_id=$24,
+        stock_pool_note=$25,
         updated_at=CURRENT_TIMESTAMP
-      WHERE id=$23
+      WHERE id=$26
       RETURNING *
       `,
       [
@@ -654,6 +742,9 @@ const updateProduct = async (req, res) => {
         is_combo_eligible,
         is_active,
         expiry_date,
+        stock_source,
+        stock_pool_id,
+        stock_pool_note,
         id,
       ]
     );
@@ -672,6 +763,9 @@ const updateProduct = async (req, res) => {
           name: existingProduct.rows[0].name,
           sku: existingProduct.rows[0].sku,
           current_stock: existingProduct.rows[0].current_stock,
+          stock_source: existingProduct.rows[0].stock_source,
+          stock_pool_id: existingProduct.rows[0].stock_pool_id,
+          stock_pool_note: existingProduct.rows[0].stock_pool_note,
           stock_status_override: existingProduct.rows[0].stock_status_override,
           retail_price: existingProduct.rows[0].retail_price,
           wholesale_price: existingProduct.rows[0].wholesale_price,
@@ -681,6 +775,9 @@ const updateProduct = async (req, res) => {
         },
         current: {
           current_stock: r.rows[0].current_stock,
+          stock_source: r.rows[0].stock_source,
+          stock_pool_id: r.rows[0].stock_pool_id,
+          stock_pool_note: r.rows[0].stock_pool_note,
           stock_status_override: r.rows[0].stock_status_override,
           retail_price: r.rows[0].retail_price,
           wholesale_price: r.rows[0].wholesale_price,
@@ -743,16 +840,23 @@ const getOutOfStockProducts = async (req, res) => {
   try {
     const r = await pool.query(`
       SELECT
-        *,
-        COALESCE(NULLIF(stock_status_override, ''), 'out_of_stock') AS stock_status
-      FROM products
+        p.*,
+        p.current_stock AS product_current_stock,
+        (${effectiveStockExpression})::INT AS current_stock,
+        (${effectiveStockExpression})::INT AS stock,
+        sp.name AS stock_pool_name,
+        sp.sku AS stock_pool_sku,
+        COALESCE(sp.total_stock, 0)::INT AS stock_pool_total_stock,
+        COALESCE(NULLIF(p.stock_status_override, ''), 'out_of_stock') AS stock_status
+      FROM products p
+      LEFT JOIN inventory_stock_pools sp ON sp.id = p.stock_pool_id
       WHERE
-        COALESCE(is_active, TRUE) = TRUE
+        COALESCE(p.is_active, TRUE) = TRUE
         AND (
-          COALESCE(current_stock, 0) <= 0
-          OR stock_status_override = 'out_of_stock'
+          ${effectiveStockExpression} <= 0
+          OR p.stock_status_override = 'out_of_stock'
         )
-      ORDER BY id DESC
+      ORDER BY p.id DESC
     `);
     return handleSuccess(res, 200, "Out of stock products", r.rows);
   } catch (err) {
@@ -764,17 +868,24 @@ const getLowStockProducts = async (req, res) => {
   try {
     const r = await pool.query(`
       SELECT
-        *,
-        COALESCE(NULLIF(stock_status_override, ''), 'limited_stock') AS stock_status
-      FROM products
+        p.*,
+        p.current_stock AS product_current_stock,
+        (${effectiveStockExpression})::INT AS current_stock,
+        (${effectiveStockExpression})::INT AS stock,
+        sp.name AS stock_pool_name,
+        sp.sku AS stock_pool_sku,
+        COALESCE(sp.total_stock, 0)::INT AS stock_pool_total_stock,
+        COALESCE(NULLIF(p.stock_status_override, ''), 'limited_stock') AS stock_status
+      FROM products p
+      LEFT JOIN inventory_stock_pools sp ON sp.id = p.stock_pool_id
       WHERE
-        COALESCE(is_active, TRUE) = TRUE
-        AND COALESCE(current_stock, 0) > 0
+        COALESCE(p.is_active, TRUE) = TRUE
+        AND ${effectiveStockExpression} > 0
         AND (
-          stock_status_override = 'limited_stock'
-          OR COALESCE(current_stock, 0) <= GREATEST(COALESCE(min_order_qty, 1), COALESCE(reorder_level, 10), 10)
+          p.stock_status_override = 'limited_stock'
+          OR ${effectiveStockExpression} <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, sp.reorder_level, 10), 10)
         )
-      ORDER BY current_stock ASC, id DESC
+      ORDER BY current_stock ASC, p.id DESC
     `);
     return handleSuccess(res, 200, "Low stock products", r.rows);
   } catch (err) {
