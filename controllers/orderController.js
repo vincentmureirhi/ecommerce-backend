@@ -1445,10 +1445,16 @@ const guestCheckout = async (req, res) => {
       (normalizedOrderType === 'route'
         ? (effectiveSalesRepId ? 'route_sales_rep_capture' : 'route_self_service')
         : 'normal_self_service');
+    const initialAmountPaid =
+      normalizedOrderType === 'route' ? computedTotalAmount : 0;
+    const initialPaymentStatus =
+      normalizedOrderType === 'route' ? 'completed' : 'pending';
     const initialPaymentState =
       normalizedOrderType === 'route'
-        ? deriveRoutePaymentState(computedTotalAmount, 0, null)
+        ? deriveRoutePaymentState(computedTotalAmount, initialAmountPaid, null)
         : 'unpaid';
+    const initialLastPaymentDate =
+      normalizedOrderType === 'route' ? new Date().toISOString() : null;
 
     const orderResult = await client.query(
       `
@@ -1465,12 +1471,13 @@ const guestCheckout = async (req, res) => {
         order_workflow_type,
         total_amount,
         amount_paid,
+        last_payment_date,
         notes,
         payment_status,
         payment_state,
         is_printed
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, $11, 'pending', $12, FALSE)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, FALSE)
       RETURNING *
       `,
       [
@@ -1484,7 +1491,10 @@ const guestCheckout = async (req, res) => {
         effectiveSalesRepId || null,
         finalWorkflowType,
         computedTotalAmount,
+        initialAmountPaid,
+        initialLastPaymentDate,
         normalizedNotes,
+        initialPaymentStatus,
         initialPaymentState,
       ]
     );
@@ -1823,20 +1833,26 @@ const createOrder = async (req, res) => {
 
     const finalTotalAmount = computedTotalAmount;
 
+    const initialAmountPaid =
+      normalizedOrderType === 'route'
+        ? finalTotalAmount
+        : roundMoney(submittedAmountPaid);
+
     const initialPaymentStatus =
-      normalizedOrderType === 'normal' &&
-      submittedAmountPaid >= finalTotalAmount &&
-      finalTotalAmount > 0
+      normalizedOrderType === 'route' ||
+      (normalizedOrderType === 'normal' &&
+        initialAmountPaid >= finalTotalAmount &&
+        finalTotalAmount > 0)
         ? 'completed'
         : 'pending';
 
     const initialPaymentState =
       normalizedOrderType === 'route'
-        ? deriveRoutePaymentState(finalTotalAmount, submittedAmountPaid, normalizedDueDate)
+        ? deriveRoutePaymentState(finalTotalAmount, initialAmountPaid, normalizedDueDate)
         : 'unpaid';
 
     const initialLastPaymentDate =
-      submittedAmountPaid > 0 ? new Date().toISOString() : null;
+      initialAmountPaid > 0 ? new Date().toISOString() : null;
 
     const inferredWorkflowType =
       normalizedOrderType === 'route'
@@ -1890,7 +1906,7 @@ const createOrder = async (req, res) => {
         effectiveSalesRepId || null,
         finalWorkflowType,
         finalTotalAmount,
-        roundMoney(submittedAmountPaid),
+        initialAmountPaid,
         normalizedDueDate,
         initialLastPaymentDate,
         normalizedNotes,
@@ -2693,6 +2709,8 @@ const getOrderStatistics = async (req, res) => {
     let query = `
       SELECT
         COUNT(*) AS total_orders,
+        COUNT(CASE WHEN order_type = 'route' THEN 1 END) AS route_orders,
+        COUNT(CASE WHEN COALESCE(order_type, 'normal') <> 'route' THEN 1 END) AS normal_orders,
         COUNT(CASE WHEN order_status = 'completed' THEN 1 END) AS completed_orders,
         COUNT(CASE WHEN order_status = 'pending' THEN 1 END) AS pending_orders,
         COUNT(CASE WHEN payment_status = 'completed' THEN 1 END) AS paid_orders,
@@ -2716,6 +2734,19 @@ const getOrderStatistics = async (req, res) => {
         ) AS overdue_route_orders,
         COALESCE(SUM(total_amount), 0) AS total_revenue,
         COALESCE(SUM(COALESCE(amount_paid, 0)), 0) AS total_paid_amount,
+        COALESCE(SUM(
+          CASE
+            WHEN order_type = 'route' THEN COALESCE(amount_paid, total_amount, 0)
+            ELSE 0
+          END
+        ), 0) AS route_money_in,
+        COALESCE(SUM(
+          CASE
+            WHEN COALESCE(order_type, 'normal') <> 'route' THEN COALESCE(amount_paid, 0)
+            ELSE 0
+          END
+        ), 0) AS normal_money_in,
+        COALESCE(SUM(COALESCE(amount_paid, 0)), 0) AS combined_money_in,
         COALESCE(SUM(GREATEST(COALESCE(total_amount, 0) - COALESCE(amount_paid, 0), 0)), 0) AS total_outstanding_balance,
         AVG(total_amount) AS avg_order_value,
         COUNT(DISTINCT customer_id) AS unique_customers

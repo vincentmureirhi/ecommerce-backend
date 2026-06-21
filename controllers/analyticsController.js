@@ -99,8 +99,24 @@ const getDashboardOverview = async (req, res) => {
           SELECT
             COUNT(*)::int AS orders,
             COALESCE(SUM(total_amount), 0)::numeric(14,2) AS ordered_value,
+            COALESCE(SUM(
+              CASE
+                WHEN order_type = 'route' THEN COALESCE(amount_paid, total_amount, 0)
+                ELSE 0
+              END
+            ), 0)::numeric(14,2) AS route_money_in,
+            COALESCE(SUM(
+              CASE
+                WHEN COALESCE(order_type, 'normal') <> 'route' THEN COALESCE(amount_paid, 0)
+                ELSE 0
+              END
+            ), 0)::numeric(14,2) AS normal_money_in,
+            COALESCE(SUM(COALESCE(amount_paid, 0)), 0)::numeric(14,2) AS combined_money_in,
             COUNT(DISTINCT COALESCE(NULLIF(customer_phone, ''), NULLIF(customer_name, ''), customer_id::text))::int AS customers,
-            COUNT(*) FILTER (WHERE LOWER(COALESCE(order_status, 'pending')) IN ('pending', 'processing'))::int AS awaiting_dispatch
+            COUNT(*) FILTER (
+              WHERE COALESCE(order_type, 'normal') <> 'route'
+                AND LOWER(COALESCE(order_status, 'pending')) IN ('pending', 'processing')
+            )::int AS awaiting_dispatch
           FROM orders
           WHERE created_at >= $1
             AND created_at <= $2
@@ -120,6 +136,9 @@ const getDashboardOverview = async (req, res) => {
           pp.revenue,
           po.orders,
           po.ordered_value,
+          po.route_money_in,
+          po.normal_money_in,
+          po.combined_money_in,
           po.customers,
           po.awaiting_dispatch,
           py.total_payments,
@@ -148,6 +167,19 @@ const getDashboardOverview = async (req, res) => {
           SELECT
             COUNT(*)::int AS orders,
             COALESCE(SUM(total_amount), 0)::numeric(14,2) AS ordered_value,
+            COALESCE(SUM(
+              CASE
+                WHEN order_type = 'route' THEN COALESCE(amount_paid, total_amount, 0)
+                ELSE 0
+              END
+            ), 0)::numeric(14,2) AS route_money_in,
+            COALESCE(SUM(
+              CASE
+                WHEN COALESCE(order_type, 'normal') <> 'route' THEN COALESCE(amount_paid, 0)
+                ELSE 0
+              END
+            ), 0)::numeric(14,2) AS normal_money_in,
+            COALESCE(SUM(COALESCE(amount_paid, 0)), 0)::numeric(14,2) AS combined_money_in,
             COUNT(DISTINCT COALESCE(NULLIF(customer_phone, ''), NULLIF(customer_name, ''), customer_id::text))::int AS customers
           FROM orders
           WHERE created_at >= $1
@@ -167,6 +199,9 @@ const getDashboardOverview = async (req, res) => {
           pp.revenue,
           po.orders,
           po.ordered_value,
+          po.route_money_in,
+          po.normal_money_in,
+          po.combined_money_in,
           po.customers,
           py.pending_payments,
           CASE
@@ -472,8 +507,12 @@ const getDashboardOverview = async (req, res) => {
     const paymentHealth = paymentHealthResult.rows[0] || {};
     const morning = morningSummaryResult.rows[0] || {};
 
-    const revenue = toNumber(kpi.revenue);
+    const paymentRevenue = toNumber(kpi.revenue);
     const bookedSales = toNumber(kpi.ordered_value);
+    const routeMoneyIn = toNumber(kpi.route_money_in);
+    const normalMoneyIn = toNumber(kpi.normal_money_in) || paymentRevenue;
+    const combinedMoneyIn = toNumber(kpi.combined_money_in) || (routeMoneyIn + normalMoneyIn);
+    const revenue = combinedMoneyIn;
     const orders = toInt(kpi.orders);
     const paymentSuccessRate = toInt(kpi.payment_success_rate);
     const pendingPayments = toInt(kpi.pending_payments);
@@ -571,6 +610,10 @@ const getDashboardOverview = async (req, res) => {
       },
       kpis: {
         revenue: Math.round(revenue),
+        payment_revenue: Math.round(paymentRevenue),
+        route_money_in: Math.round(routeMoneyIn),
+        normal_money_in: Math.round(normalMoneyIn),
+        combined_money_in: Math.round(combinedMoneyIn),
         booked_sales: Math.round(bookedSales),
         orders,
         aov: orders > 0 ? Math.round(bookedSales / orders) : 0,
