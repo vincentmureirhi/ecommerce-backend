@@ -2189,8 +2189,8 @@ const getRouteCustomerDashboard = async (req, res) => {
         status,
         current_credit_limit,
         requested_credit_limit,
-        request_reason,
-        admin_notes,
+        reason AS request_reason,
+        decision_notes AS admin_notes,
         created_at,
         reviewed_at
       FROM route_customer_credit_limit_requests
