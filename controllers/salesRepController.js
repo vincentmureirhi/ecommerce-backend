@@ -9,6 +9,12 @@ const SALES_REP_TOKEN_EXPIRY = '24h';
 const MAX_ACCEPTABLE_LOCATION_ACCURACY_METERS = 5000;
 const MAX_LOCATION_AGE_MS = 60 * 60 * 1000;
 const MAX_FUTURE_LOCATION_DRIFT_MS = 15 * 60 * 1000;
+const KENYA_LOCATION_BOUNDS = {
+  minLatitude: -5.2,
+  maxLatitude: 5.6,
+  minLongitude: 33.4,
+  maxLongitude: 42.3,
+};
 
 function normalizeNumber(value, fallback = null) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -341,6 +347,15 @@ const saveSalesRepLocation = async (req, res) => {
 
     if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
       return handleError(res, 400, 'Invalid latitude/longitude range');
+    }
+
+    if (
+      lat < KENYA_LOCATION_BOUNDS.minLatitude ||
+      lat > KENYA_LOCATION_BOUNDS.maxLatitude ||
+      lng < KENYA_LOCATION_BOUNDS.minLongitude ||
+      lng > KENYA_LOCATION_BOUNDS.maxLongitude
+    ) {
+      return handleError(res, 400, 'Location is outside the configured Kenya operating area');
     }
 
     accuracy = cleanOptionalRange(accuracy, 0, MAX_ACCEPTABLE_LOCATION_ACCURACY_METERS);
