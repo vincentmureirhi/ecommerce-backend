@@ -1477,7 +1477,7 @@ const guestCheckout = async (req, res) => {
         payment_state,
         is_printed
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, FALSE)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, FALSE)
       RETURNING *
       `,
       [
@@ -1894,7 +1894,7 @@ const createOrder = async (req, res) => {
         payment_state,
         is_printed
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, FALSE)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, FALSE)
       RETURNING *
       `,
       [
