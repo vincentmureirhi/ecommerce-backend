@@ -61,6 +61,12 @@ function initializeWebSocket(httpServer) {
       socket.emit('subscription:confirmed', { type: 'dashboard' });
     });
 
+    socket.on('subscribe:route-operations', () => {
+      socket.join('route-operations-room');
+      console.log(`Route operations subscription: ${socket.id}`);
+      socket.emit('subscription:confirmed', { type: 'route-operations' });
+    });
+
     socket.on('disconnect', () => {
       console.log(`❌ Client disconnected: ${socket.id}`);
       connectedClients.delete(socket.id);
@@ -156,6 +162,22 @@ function broadcastDashboardUpdated(eventData) {
   }
 }
 
+function broadcastRouteOperationEvent(eventData) {
+  if (io) {
+    io.to('route-operations-room').emit('route-operations:updated', {
+      type: eventData?.event_type || eventData?.type || 'route_operation_event',
+      timestamp: new Date(),
+      data: eventData || {},
+    });
+
+    io.to('dashboard-room').emit('dashboard:updated', {
+      type: 'route_operation_event',
+      timestamp: new Date(),
+      data: eventData || {},
+    });
+  }
+}
+
 function getConnectedClientsCount() {
   return connectedClients.size;
 }
@@ -168,5 +190,6 @@ module.exports = {
   broadcastPaymentCompleted,
   broadcastPaymentPending,
   broadcastDashboardUpdated,
+  broadcastRouteOperationEvent,
   getConnectedClientsCount,
 };

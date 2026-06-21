@@ -11,7 +11,11 @@ const {
   verifyOrderTrackingToken,
 } = require('../utils/orderTrackingToken');
 const { enqueuePaymentConfirmedSms } = require('../services/smsService');
-const { broadcastDashboardUpdated } = require('../websocket');
+const {
+  broadcastDashboardUpdated,
+  broadcastRouteOperationEvent,
+} = require('../websocket');
+const { attachOrderToActiveRouteCycle } = require('../services/routeOperationsService');
 
 /**
  * Business-rule validation error for order creation.
@@ -1543,6 +1547,10 @@ const guestCheckout = async (req, res) => {
       );
     }
 
+    const routeOperationEvent = normalizedOrderType === 'route'
+      ? await attachOrderToActiveRouteCycle(client, { orderId })
+      : null;
+
     await client.query('COMMIT');
 
     broadcastDashboardUpdated({
@@ -1551,6 +1559,10 @@ const guestCheckout = async (req, res) => {
       order_number: orderNum,
       stock_changes: stockChanges,
     });
+
+    if (routeOperationEvent) {
+      broadcastRouteOperationEvent(routeOperationEvent);
+    }
 
     const createdOrder = enrichOrder(orderResult.rows[0]);
     createdOrder.route_credit = routeCreditResult;
@@ -1953,6 +1965,10 @@ const createOrder = async (req, res) => {
       );
     }
 
+    const routeOperationEvent = normalizedOrderType === 'route'
+      ? await attachOrderToActiveRouteCycle(client, { orderId })
+      : null;
+
     await client.query('COMMIT');
 
     broadcastDashboardUpdated({
@@ -1961,6 +1977,10 @@ const createOrder = async (req, res) => {
       order_number: orderNum,
       stock_changes: stockChanges,
     });
+
+    if (routeOperationEvent) {
+      broadcastRouteOperationEvent(routeOperationEvent);
+    }
 
     const createdOrder = enrichOrder(orderResult.rows[0]);
     createdOrder.route_credit = routeCreditResult;
