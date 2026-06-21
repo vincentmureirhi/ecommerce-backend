@@ -57,10 +57,10 @@ function createRes() {
     await evaluatePricing({ body: { items: [] } }, res);
 
     assert.strictEqual(res.statusCode, 400);
-    assert.deepStrictEqual(res.body, {
-      success: false,
-      error: 'items must be a non-empty array',
-    });
+    assert.strictEqual(res.body.success, false);
+    assert.strictEqual(res.body.error, 'items must be a non-empty array');
+    assert.strictEqual(res.body.message, 'items must be a non-empty array');
+    assert.strictEqual(res.body.errorDetails?.code, 'VALIDATION_ERROR');
   }
 
   {
@@ -69,10 +69,10 @@ function createRes() {
     await evaluatePricing({ body: { items: [{ product_id: 999, quantity: 2 }] } }, res);
 
     assert.strictEqual(res.statusCode, 404);
-    assert.deepStrictEqual(res.body, {
-      success: false,
-      error: 'Product not found: 999',
-    });
+    assert.strictEqual(res.body.success, false);
+    assert.strictEqual(res.body.error, 'Product not found: 999');
+    assert.strictEqual(res.body.message, 'Product not found: 999');
+    assert.strictEqual(res.body.errorDetails?.code, 'NOT_FOUND');
   }
 
   {
@@ -125,7 +125,6 @@ function createRes() {
       ],
     });
   }
-
 
   console.log('pricingEvaluateController tests passed');
 })().catch((err) => {
