@@ -2102,6 +2102,127 @@ const getRouteCustomerDashboard = async (req, res) => {
       [customerId]
     );
 
+    const summary = summaryResult.rows[0] || {};
+
+    const routePulseResult = await pool.query(
+      `
+      SELECT
+        COUNT(*) FILTER (WHERE created_at >= DATE_TRUNC('month', NOW()))::int AS month_order_count,
+        COALESCE(SUM(total_amount) FILTER (WHERE created_at >= DATE_TRUNC('month', NOW())), 0)::numeric(12,2) AS month_order_value,
+        COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '30 days')::int AS rolling_30d_order_count,
+        COALESCE(SUM(total_amount) FILTER (WHERE created_at >= NOW() - INTERVAL '30 days'), 0)::numeric(12,2) AS rolling_30d_order_value,
+        COALESCE(AVG(total_amount), 0)::numeric(12,2) AS average_order_value,
+        COUNT(DISTINCT sales_rep_id) FILTER (WHERE sales_rep_id IS NOT NULL)::int AS reps_served_count,
+        MAX(created_at) AS last_order_at
+      FROM orders
+      WHERE customer_id = $1
+        AND order_type = 'route'
+        AND LOWER(COALESCE(order_status, 'pending')) <> 'cancelled'
+      `,
+      [customerId]
+    );
+
+    const topProductsResult = await pool.query(
+      `
+      SELECT
+        p.id,
+        p.name,
+        p.sku,
+        COALESCE(SUM(oi.quantity), 0)::int AS total_units,
+        COALESCE(SUM(COALESCE(oi.line_total, oi.quantity * oi.price_at_purchase)), 0)::numeric(12,2) AS total_value,
+        MAX(o.created_at) AS last_ordered_at
+      FROM order_items oi
+      INNER JOIN orders o ON o.id = oi.order_id
+      INNER JOIN products p ON p.id = oi.product_id
+      WHERE o.customer_id = $1
+        AND o.order_type = 'route'
+        AND LOWER(COALESCE(o.order_status, 'pending')) <> 'cancelled'
+      GROUP BY p.id, p.name, p.sku
+      ORDER BY total_units DESC, total_value DESC, last_ordered_at DESC NULLS LAST
+      LIMIT 6
+      `,
+      [customerId]
+    );
+
+    let regionRankRows = [];
+    if (summary.region_id) {
+      const regionRankResult = await pool.query(
+        `
+        WITH customer_totals AS (
+          SELECT
+            c.id AS customer_id,
+            COALESCE(SUM(o.total_amount), 0)::numeric(12,2) AS month_value,
+            COUNT(o.id)::int AS month_orders
+          FROM customers c
+          LEFT JOIN locations l ON l.id = c.location_id
+          LEFT JOIN orders o
+            ON o.customer_id = c.id
+           AND o.order_type = 'route'
+           AND LOWER(COALESCE(o.order_status, 'pending')) <> 'cancelled'
+           AND o.created_at >= DATE_TRUNC('month', NOW())
+          WHERE c.customer_type = 'route'
+            AND l.region_id = $2
+          GROUP BY c.id
+        ), ranked AS (
+          SELECT
+            customer_id,
+            month_value,
+            month_orders,
+            RANK() OVER (ORDER BY month_value DESC, month_orders DESC, customer_id ASC)::int AS region_rank,
+            COUNT(*) OVER ()::int AS total_ranked_customers
+          FROM customer_totals
+        )
+        SELECT region_rank, total_ranked_customers, month_value, month_orders
+        FROM ranked
+        WHERE customer_id = $1
+        LIMIT 1
+        `,
+        [customerId, summary.region_id]
+      );
+      regionRankRows = regionRankResult.rows;
+    }
+
+    const creditRequestsResult = await pool.query(
+      `
+      SELECT
+        id,
+        status,
+        current_credit_limit,
+        requested_credit_limit,
+        request_reason,
+        admin_notes,
+        created_at,
+        reviewed_at
+      FROM route_customer_credit_limit_requests
+      WHERE customer_id = $1
+      ORDER BY created_at DESC
+      LIMIT 5
+      `,
+      [customerId]
+    );
+
+    const creditLimitValue = Number(summary.credit_limit || 0);
+    const availableCreditValue = Number(summary.available_credit || 0);
+    const currentBalanceValue = Number(summary.current_balance || 0);
+    const creditUsagePercent = creditLimitValue > 0
+      ? Math.min(100, Math.round((currentBalanceValue / creditLimitValue) * 100))
+      : 0;
+    const pulse = routePulseResult.rows[0] || {};
+    const portalNotices = [];
+
+    if (account.must_change_password) {
+      portalNotices.push({ type: 'security', tone: 'warning', title: 'Change your password', message: 'Use a private password before sharing this account with staff.' });
+    }
+    if (summary.is_credit_active === false) {
+      portalNotices.push({ type: 'credit', tone: 'danger', title: 'Credit paused', message: 'Contact XPOSE before placing a route order.' });
+    }
+    if (creditLimitValue > 0 && availableCreditValue <= creditLimitValue * 0.2) {
+      portalNotices.push({ type: 'credit_room', tone: 'warning', title: 'Credit room is low', message: 'Plan a smaller order or ask your sales rep to request a limit review.' });
+    }
+    if (!pulse.last_order_at) {
+      portalNotices.push({ type: 'welcome', tone: 'info', title: 'Ready for first route order', message: 'Your sales rep can capture your order during the next route visit.' });
+    }
+
     return success(res, 200, 'Route customer dashboard retrieved successfully', {
       account: {
         id: account.id,
@@ -2116,7 +2237,28 @@ const getRouteCustomerDashboard = async (req, res) => {
         phone: account.phone,
         member_since: account.customer_created_at,
       },
-      financial_summary: summaryResult.rows[0] || null,
+      financial_summary: summary || null,
+      route_insights: {
+        month_order_count: pulse.month_order_count || 0,
+        month_order_value: pulse.month_order_value || 0,
+        rolling_30d_order_count: pulse.rolling_30d_order_count || 0,
+        rolling_30d_order_value: pulse.rolling_30d_order_value || 0,
+        average_order_value: pulse.average_order_value || 0,
+        reps_served_count: pulse.reps_served_count || 0,
+        last_order_at: pulse.last_order_at || null,
+        credit_usage_percent: creditUsagePercent,
+        suggested_action: account.must_change_password
+          ? 'Change your password'
+          : availableCreditValue <= 0 && creditLimitValue > 0
+          ? 'Request a credit review'
+          : pulse.last_order_at
+          ? 'Prepare your next route order'
+          : 'Wait for your first route capture',
+      },
+      region_rank: regionRankRows[0] || null,
+      top_products: topProductsResult.rows,
+      recent_credit_requests: creditRequestsResult.rows,
+      portal_notices: portalNotices,
       assigned_sales_rep: assignedRepResult.rows[0] || null,
       served_by_sales_reps: servedByRepsResult.rows,
       recent_orders: recentOrdersResult.rows,
