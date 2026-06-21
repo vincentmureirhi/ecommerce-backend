@@ -17,6 +17,7 @@ const { initializeWebSocket } = require('./websocket');
 const { autoFailStalePendingPayments } = require('./jobs/paymentAutoFail');
 const { autoProgressOrders } = require('./jobs/orderProgressionJob');
 const { processQueuedSmsNotifications } = require('./jobs/smsOutboxJob');
+const { processQueuedOrderEvents } = require('./jobs/orderEventOutboxJob');
 const { apiRateLimiter } = require('./middleware/rateLimitMiddleware');
 const { requestContextMiddleware } = require('./middleware/requestContextMiddleware');
 const { handleError } = require('./utils/errorHandler');
@@ -332,6 +333,17 @@ if (envFlag('RUN_BACKGROUND_JOBS', true)) {
       }
     },
     envInt('SMS_JOB_INTERVAL_MS', 60000, { min: 5000 })
+  );
+
+  scheduleRepeatingJob(
+    'Order event outbox',
+    async () => {
+      const result = await processQueuedOrderEvents();
+      if (result.processed || result.retried || result.failed) {
+        console.log('Order event outbox result:', result);
+      }
+    },
+    envInt('ORDER_EVENT_OUTBOX_INTERVAL_MS', 10000, { min: 5000 })
   );
 } else {
   console.log('Background jobs are disabled for this instance');

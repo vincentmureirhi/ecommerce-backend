@@ -11,11 +11,11 @@ const {
   verifyOrderTrackingToken,
 } = require('../utils/orderTrackingToken');
 const { enqueuePaymentConfirmedSms } = require('../services/smsService');
-const {
-  broadcastDashboardUpdated,
-  broadcastRouteOperationEvent,
-} = require('../websocket');
 const { attachOrderToActiveRouteCycle } = require('../services/routeOperationsService');
+const {
+  enqueueOrderEvent,
+  kickOrderEventOutbox,
+} = require('../services/orderEventOutboxService');
 
 /**
  * Business-rule validation error for order creation.
@@ -87,12 +87,22 @@ function assertProductOrderQuantity(product, quantity) {
   }
 }
 
-async function reserveStockForOrder(client, items) {
+async function reserveStockForOrder(client, items, orderId, context = {}) {
   const stockChanges = [];
+
+  if (!orderId) {
+    throw new Error('orderId is required before reserving stock');
+  }
 
   for (const item of items) {
     const quantity = Number(item.quantity || 0);
     const stockSource = String(item.stock_source || 'product').toLowerCase();
+    const metadata = {
+      order_number: context.order_number || null,
+      order_type: context.order_type || null,
+      product_name: item.product_name || null,
+      stock_pool_name: item.stock_pool_name || null,
+    };
 
     if (stockSource === 'pool') {
       const poolId = Number(item.stock_pool_id || 0);
@@ -132,6 +142,26 @@ async function reserveStockForOrder(client, items) {
         );
       }
 
+      const remainingStock = Number(result.rows[0].total_stock || 0);
+      const reservation = await client.query(
+        `
+        INSERT INTO inventory_stock_reservations
+          (order_id, product_id, stock_source, stock_pool_id, quantity, status, stock_after, metadata, reserved_at, created_at, updated_at)
+        VALUES ($1, $2, 'pool', $3, $4, 'reserved', $5, $6::jsonb, NOW(), NOW(), NOW())
+        RETURNING id
+        `,
+        [orderId, item.product_id, result.rows[0].id, quantity, remainingStock, JSON.stringify(metadata)]
+      );
+
+      await client.query(
+        `
+        INSERT INTO inventory_stock_movements
+          (reservation_id, order_id, product_id, stock_source, stock_pool_id, movement_type, quantity_delta, quantity_abs, stock_after, metadata, created_at)
+        VALUES ($1, $2, $3, 'pool', $4, 'order_reserved', $5, $6, $7, $8::jsonb, NOW())
+        `,
+        [reservation.rows[0].id, orderId, item.product_id, result.rows[0].id, -quantity, quantity, remainingStock, JSON.stringify(metadata)]
+      );
+
       stockChanges.push({
         product_id: item.product_id,
         product_name: item.product_name || `Product ${item.product_id}`,
@@ -139,7 +169,8 @@ async function reserveStockForOrder(client, items) {
         stock_pool_id: result.rows[0].id,
         stock_pool_name: result.rows[0].name,
         quantity_sold: quantity,
-        remaining_stock: Number(result.rows[0].total_stock || 0),
+        remaining_stock: remainingStock,
+        reservation_id: reservation.rows[0].id,
       });
 
       continue;
@@ -170,18 +201,216 @@ async function reserveStockForOrder(client, items) {
       );
     }
 
+    const remainingStock = Number(result.rows[0].current_stock || 0);
+    const reservation = await client.query(
+      `
+      INSERT INTO inventory_stock_reservations
+        (order_id, product_id, stock_source, stock_pool_id, quantity, status, stock_after, metadata, reserved_at, created_at, updated_at)
+      VALUES ($1, $2, 'product', NULL, $3, 'reserved', $4, $5::jsonb, NOW(), NOW(), NOW())
+      RETURNING id
+      `,
+      [orderId, result.rows[0].id, quantity, remainingStock, JSON.stringify(metadata)]
+    );
+
+    await client.query(
+      `
+      INSERT INTO inventory_stock_movements
+        (reservation_id, order_id, product_id, stock_source, stock_pool_id, movement_type, quantity_delta, quantity_abs, stock_after, metadata, created_at)
+      VALUES ($1, $2, $3, 'product', NULL, 'order_reserved', $4, $5, $6, $7::jsonb, NOW())
+      `,
+      [reservation.rows[0].id, orderId, result.rows[0].id, -quantity, quantity, remainingStock, JSON.stringify(metadata)]
+    );
+
     stockChanges.push({
       product_id: result.rows[0].id,
       product_name: result.rows[0].name,
       stock_source: 'product',
       quantity_sold: quantity,
-      remaining_stock: Number(result.rows[0].current_stock || 0),
+      remaining_stock: remainingStock,
+      reservation_id: reservation.rows[0].id,
     });
   }
 
   return stockChanges;
 }
 
+async function releaseReservedStockForOrder(client, orderId, reason = 'order_cancelled') {
+  const releasedChanges = [];
+
+  const reservations = await client.query(
+    `
+    SELECT *
+    FROM inventory_stock_reservations
+    WHERE order_id = $1
+      AND status = 'reserved'
+    ORDER BY id ASC
+    FOR UPDATE
+    `,
+    [orderId]
+  );
+
+  for (const reservation of reservations.rows) {
+    const quantity = Number(reservation.quantity || 0);
+    if (quantity <= 0) continue;
+
+    const metadata = {
+      release_reason: reason,
+      reservation_id: reservation.id,
+    };
+
+    if (reservation.stock_source === 'pool') {
+      const result = await client.query(
+        `
+        UPDATE inventory_stock_pools
+        SET total_stock = COALESCE(total_stock, 0) + $1,
+            updated_at = NOW()
+        WHERE id = $2
+        RETURNING id, name, total_stock
+        `,
+        [quantity, reservation.stock_pool_id]
+      );
+
+      const stockAfter = Number(result.rows[0]?.total_stock || 0);
+      await client.query(
+        `
+        UPDATE inventory_stock_reservations
+        SET status = 'released',
+            released_at = NOW(),
+            release_reason = $1,
+            stock_after = $2,
+            updated_at = NOW()
+        WHERE id = $3
+        `,
+        [reason, stockAfter, reservation.id]
+      );
+
+      await client.query(
+        `
+        INSERT INTO inventory_stock_movements
+          (reservation_id, order_id, product_id, stock_source, stock_pool_id, movement_type, quantity_delta, quantity_abs, stock_after, metadata, created_at)
+        VALUES ($1, $2, $3, 'pool', $4, 'order_released', $5, $6, $7, $8::jsonb, NOW())
+        `,
+        [reservation.id, orderId, reservation.product_id, reservation.stock_pool_id, quantity, quantity, stockAfter, JSON.stringify(metadata)]
+      );
+
+      releasedChanges.push({
+        product_id: reservation.product_id,
+        stock_source: 'pool',
+        stock_pool_id: reservation.stock_pool_id,
+        quantity_released: quantity,
+        remaining_stock: stockAfter,
+      });
+
+      continue;
+    }
+
+    const result = await client.query(
+      `
+      UPDATE products
+      SET current_stock = COALESCE(current_stock, 0) + $1,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2
+      RETURNING id, name, current_stock
+      `,
+      [quantity, reservation.product_id]
+    );
+
+    const stockAfter = Number(result.rows[0]?.current_stock || 0);
+    await client.query(
+      `
+      UPDATE inventory_stock_reservations
+      SET status = 'released',
+          released_at = NOW(),
+          release_reason = $1,
+          stock_after = $2,
+          updated_at = NOW()
+      WHERE id = $3
+      `,
+      [reason, stockAfter, reservation.id]
+    );
+
+    await client.query(
+      `
+      INSERT INTO inventory_stock_movements
+        (reservation_id, order_id, product_id, stock_source, stock_pool_id, movement_type, quantity_delta, quantity_abs, stock_after, metadata, created_at)
+      VALUES ($1, $2, $3, 'product', NULL, 'order_released', $4, $5, $6, $7::jsonb, NOW())
+      `,
+      [reservation.id, orderId, reservation.product_id, quantity, quantity, stockAfter, JSON.stringify(metadata)]
+    );
+
+    releasedChanges.push({
+      product_id: reservation.product_id,
+      product_name: result.rows[0]?.name || `Product ${reservation.product_id}`,
+      stock_source: 'product',
+      quantity_released: quantity,
+      remaining_stock: stockAfter,
+    });
+  }
+
+  return releasedChanges;
+}
+
+async function consumeReservedStockForOrder(client, orderId) {
+  const consumedChanges = [];
+
+  const reservations = await client.query(
+    `
+    SELECT *
+    FROM inventory_stock_reservations
+    WHERE order_id = $1
+      AND status = 'reserved'
+    ORDER BY id ASC
+    FOR UPDATE
+    `,
+    [orderId]
+  );
+
+  for (const reservation of reservations.rows) {
+    const quantity = Number(reservation.quantity || 0);
+    const metadata = {
+      reservation_id: reservation.id,
+      consumed_reason: 'order_completed',
+    };
+
+    await client.query(
+      `
+      UPDATE inventory_stock_reservations
+      SET status = 'consumed',
+          consumed_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $1
+      `,
+      [reservation.id]
+    );
+
+    await client.query(
+      `
+      INSERT INTO inventory_stock_movements
+        (reservation_id, order_id, product_id, stock_source, stock_pool_id, movement_type, quantity_delta, quantity_abs, stock_after, metadata, created_at)
+      VALUES ($1, $2, $3, $4, $5, 'order_consumed', 0, $6, $7, $8::jsonb, NOW())
+      `,
+      [
+        reservation.id,
+        orderId,
+        reservation.product_id,
+        reservation.stock_source,
+        reservation.stock_pool_id,
+        quantity,
+        reservation.stock_after,
+        JSON.stringify(metadata),
+      ]
+    );
+
+    consumedChanges.push({
+      product_id: reservation.product_id,
+      stock_source: reservation.stock_source,
+      stock_pool_id: reservation.stock_pool_id,
+      quantity_consumed: quantity,
+    });
+  }
+
+  return consumedChanges;
+}
 const VALID_ORDER_TYPES = new Set(['normal', 'route']);
 const VALID_ORDER_STATUSES = new Set(['pending', 'processing', 'dispatched', 'completed', 'cancelled']);
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -1439,7 +1668,6 @@ const guestCheckout = async (req, res) => {
             creditLimitRequestReason: credit_limit_request_reason,
           })
         : null;
-    const stockChanges = await reserveStockForOrder(client, preparedItems);
     const finalWorkflowType =
       requestedWorkflowType ||
       (normalizedOrderType === 'route'
@@ -1500,6 +1728,10 @@ const guestCheckout = async (req, res) => {
     );
 
     const orderId = orderResult.rows[0].id;
+    const stockChanges = await reserveStockForOrder(client, preparedItems, orderId, {
+      order_number: orderNum,
+      order_type: normalizedOrderType,
+    });
 
     if (routeCreditResult?.credit_request_id) {
       await client.query(
@@ -1561,18 +1793,29 @@ const guestCheckout = async (req, res) => {
       ? await attachOrderToActiveRouteCycle(client, { orderId })
       : null;
 
-    await client.query('COMMIT');
-
-    broadcastDashboardUpdated({
-      type: 'order_created',
-      order_id: orderId,
-      order_number: orderNum,
-      stock_changes: stockChanges,
-    });
+    await enqueueOrderEvent(
+      client,
+      'dashboard_updated',
+      {
+        type: 'order_created',
+        order_id: orderId,
+        order_number: orderNum,
+        stock_changes: stockChanges,
+      },
+      { aggregateId: orderId }
+    );
 
     if (routeOperationEvent) {
-      broadcastRouteOperationEvent(routeOperationEvent);
+      await enqueueOrderEvent(
+        client,
+        'route_operation_event',
+        routeOperationEvent,
+        { aggregateType: 'route_operation', aggregateId: orderId }
+      );
     }
+
+    await client.query('COMMIT');
+    kickOrderEventOutbox();
 
     const createdOrder = enrichOrder(orderResult.rows[0]);
     createdOrder.route_credit = routeCreditResult;
@@ -1872,8 +2115,6 @@ const createOrder = async (req, res) => {
             creditLimitRequestReason: credit_limit_request_reason,
           })
         : null;
-    const stockChanges = await reserveStockForOrder(client, preparedItems);
-
     const orderResult = await client.query(
       `
       INSERT INTO orders
@@ -1916,6 +2157,10 @@ const createOrder = async (req, res) => {
     );
 
     const orderId = orderResult.rows[0].id;
+    const stockChanges = await reserveStockForOrder(client, preparedItems, orderId, {
+      order_number: orderNum,
+      order_type: normalizedOrderType,
+    });
 
     if (routeCreditResult?.credit_request_id) {
       await client.query(
@@ -1985,18 +2230,29 @@ const createOrder = async (req, res) => {
       ? await attachOrderToActiveRouteCycle(client, { orderId })
       : null;
 
-    await client.query('COMMIT');
-
-    broadcastDashboardUpdated({
-      type: 'order_created',
-      order_id: orderId,
-      order_number: orderNum,
-      stock_changes: stockChanges,
-    });
+    await enqueueOrderEvent(
+      client,
+      'dashboard_updated',
+      {
+        type: 'order_created',
+        order_id: orderId,
+        order_number: orderNum,
+        stock_changes: stockChanges,
+      },
+      { aggregateId: orderId }
+    );
 
     if (routeOperationEvent) {
-      broadcastRouteOperationEvent(routeOperationEvent);
+      await enqueueOrderEvent(
+        client,
+        'route_operation_event',
+        routeOperationEvent,
+        { aggregateType: 'route_operation', aggregateId: orderId }
+      );
     }
+
+    await client.query('COMMIT');
+    kickOrderEventOutbox();
 
     const createdOrder = enrichOrder(orderResult.rows[0]);
     createdOrder.route_credit = routeCreditResult;
@@ -2021,46 +2277,52 @@ const createOrder = async (req, res) => {
 
 // UPDATE ORDER STATUS / SETTLEMENT
 const updateOrderStatus = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const {
-      order_status,
-      payment_status,
-      amount_paid,
-      due_date,
-      notes,
-      payment_reference,
-      mpesa_reference,
-      mpesa_receipt,
-    } = req.body;
+  const { id } = req.params;
+  const {
+    order_status,
+    payment_status,
+    amount_paid,
+    due_date,
+    notes,
+    payment_reference,
+    mpesa_reference,
+    mpesa_receipt,
+  } = req.body;
 
-    const currentResult = await pool.query(
+  const normalizedRequestedStatus =
+    order_status !== undefined && order_status !== null && order_status !== ''
+      ? String(order_status).trim().toLowerCase()
+      : null;
+
+  if (normalizedRequestedStatus && !VALID_ORDER_STATUSES.has(normalizedRequestedStatus)) {
+    return handleError(
+      res,
+      400,
+      `Invalid order_status '${order_status}'. Allowed values: ${[...VALID_ORDER_STATUSES].join(', ')}`
+    );
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const currentResult = await client.query(
       `
       SELECT *
       FROM orders
       WHERE id = $1
+      FOR UPDATE
       `,
       [id]
     );
 
     if (currentResult.rows.length === 0) {
+      await client.query('ROLLBACK');
       return handleError(res, 404, 'Order not found');
     }
 
     const current = currentResult.rows[0];
-
-    // Validate order_status against allowed values before touching the DB
-    if (order_status !== undefined && order_status !== null && order_status !== '') {
-      const normalizedStatus = String(order_status).trim().toLowerCase();
-      if (!normalizedStatus || !VALID_ORDER_STATUSES.has(normalizedStatus)) {
-        return handleError(
-          res,
-          400,
-          `Invalid order_status '${order_status}'. Allowed values: ${[...VALID_ORDER_STATUSES].join(', ')}`
-        );
-      }
-    }
-
     const totalAmount = toNumber(current.total_amount, 0);
     const currentAmountPaid = toNumber(current.amount_paid, 0);
 
@@ -2068,6 +2330,7 @@ const updateOrderStatus = async (req, res) => {
     if (amount_paid !== undefined && amount_paid !== null && amount_paid !== '') {
       const parsedAmountPaid = toNumber(amount_paid, NaN);
       if (!Number.isFinite(parsedAmountPaid) || parsedAmountPaid < 0) {
+        await client.query('ROLLBACK');
         return handleError(res, 400, 'amount_paid must be a valid non-negative number');
       }
       nextAmountPaid = parsedAmountPaid;
@@ -2100,6 +2363,7 @@ const updateOrderStatus = async (req, res) => {
       (current.payment_status || 'pending') !== 'completed';
 
     if ((paymentAmountIncreased || paymentMarkedComplete) && !manualReference) {
+      await client.query('ROLLBACK');
       return handleError(
         res,
         400,
@@ -2121,7 +2385,7 @@ const updateOrderStatus = async (req, res) => {
       ? [nextNotes, `Manual payment reference: ${manualReference}`].filter(Boolean).join('\n')
       : nextNotes;
 
-    const result = await pool.query(
+    const result = await client.query(
       `
       UPDATE orders
       SET order_status = COALESCE($1, order_status),
@@ -2140,7 +2404,7 @@ const updateOrderStatus = async (req, res) => {
       RETURNING *
       `,
       [
-        order_status || null,
+        normalizedRequestedStatus,
         nextPaymentStatus,
         nextPaymentState,
         roundMoney(nextAmountPaid),
@@ -2152,6 +2416,36 @@ const updateOrderStatus = async (req, res) => {
     );
 
     const updatedOrder = enrichOrder(result.rows[0]);
+    const shouldReleaseStock =
+      normalizedRequestedStatus === 'cancelled' &&
+      String(current.order_status || '').toLowerCase() !== 'cancelled';
+    const releasedStockChanges = shouldReleaseStock
+      ? await releaseReservedStockForOrder(client, updatedOrder.id, 'order_cancelled')
+      : [];
+    const shouldConsumeStock =
+      normalizedRequestedStatus === 'completed' &&
+      String(current.order_status || '').toLowerCase() !== 'completed';
+    const consumedStockChanges = shouldConsumeStock
+      ? await consumeReservedStockForOrder(client, updatedOrder.id)
+      : [];
+
+    await enqueueOrderEvent(
+      client,
+      'dashboard_updated',
+      {
+        type: 'order_updated',
+        order_id: updatedOrder.id,
+        order_number: updatedOrder.order_number,
+        order_status: updatedOrder.order_status,
+        payment_status: updatedOrder.payment_status,
+        stock_releases: releasedStockChanges,
+        stock_consumed: consumedStockChanges,
+      },
+      { aggregateId: updatedOrder.id }
+    );
+
+    await client.query('COMMIT');
+    kickOrderEventOutbox();
 
     if (paymentMarkedComplete) {
       try {
@@ -2161,18 +2455,17 @@ const updateOrderStatus = async (req, res) => {
       }
     }
 
-    broadcastDashboardUpdated({
-      type: 'order_updated',
-      order_id: updatedOrder.id,
-      order_number: updatedOrder.order_number,
-      order_status: updatedOrder.order_status,
-      payment_status: updatedOrder.payment_status,
-    });
-
     return handleSuccess(res, 200, 'Order updated successfully', updatedOrder);
   } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (_) {
+      // ignore rollback failure
+    }
     console.error('updateOrderStatus error:', err.message);
     return handleError(res, 500, 'Failed to update order', err);
+  } finally {
+    client.release();
   }
 };
 
