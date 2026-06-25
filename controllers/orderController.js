@@ -16,6 +16,11 @@ const {
   enqueueOrderEvent,
   kickOrderEventOutbox,
 } = require('../services/orderEventOutboxService');
+const {
+  normalizeCouponCode,
+  validateCouponForOrder,
+  recordCouponRedemption,
+} = require('../services/marketingCouponService');
 
 /**
  * Business-rule validation error for order creation.
@@ -1457,6 +1462,8 @@ const guestCheckout = async (req, res) => {
       sales_rep_id,
       notes,
       items,
+      coupon_code,
+      promo_code,
     } = req.body;
 
     const authenticatedSalesRep = await resolveAuthenticatedSalesRep(req, client);
@@ -1469,6 +1476,7 @@ const guestCheckout = async (req, res) => {
     const normalizedRouteArea = normalizeText(route_area);
     const normalizedRouteNotes = normalizeText(route_notes);
     const normalizedNotes = normalizeText(notes);
+    const normalizedCouponCode = normalizeCouponCode(coupon_code || promo_code);
 
     if (!normalizedName) {
       return handleError(res, 400, 'customer_name is required');
@@ -1650,6 +1658,7 @@ const guestCheckout = async (req, res) => {
         price_source: priceSource,
 
         product_name: product.name,
+        category_id: product.category_id || null,
         stock_source: product.stock_source || 'product',
         stock_pool_id: product.stock_pool_id || null,
         stock_pool_name: product.stock_pool_name || null,
@@ -1657,12 +1666,30 @@ const guestCheckout = async (req, res) => {
     }
 
     computedTotalAmount = roundMoney(computedTotalAmount);
+    const couponApplication = normalizedCouponCode
+      ? await validateCouponForOrder(
+          client,
+          {
+            couponCode: normalizedCouponCode,
+            orderType: normalizedOrderType,
+            customerId,
+            customerPhone: normalizedPhone,
+            subtotalAmount: computedTotalAmount,
+            items: preparedItems,
+          },
+          { lock: true }
+        )
+      : null;
+    const subtotalAmount = computedTotalAmount;
+    const discountAmount = couponApplication ? couponApplication.discount_amount : 0;
+    const finalTotalAmount = couponApplication ? couponApplication.final_total_amount : subtotalAmount;
+
     const orderNum = generateOrderNumber();
     const routeCreditResult =
       normalizedOrderType === 'route'
         ? await enforceRouteCreditLimit(client, {
             customerId,
-            orderAmount: computedTotalAmount,
+            orderAmount: finalTotalAmount,
             salesRepId: effectiveSalesRepId || null,
             requestedCreditLimit: requested_credit_limit,
             creditLimitRequestReason: credit_limit_request_reason,
@@ -1674,12 +1701,12 @@ const guestCheckout = async (req, res) => {
         ? (effectiveSalesRepId ? 'route_sales_rep_capture' : 'route_self_service')
         : 'normal_self_service');
     const initialAmountPaid =
-      normalizedOrderType === 'route' ? computedTotalAmount : 0;
+      normalizedOrderType === 'route' ? finalTotalAmount : 0;
     const initialPaymentStatus =
       normalizedOrderType === 'route' ? 'completed' : 'pending';
     const initialPaymentState =
       normalizedOrderType === 'route'
-        ? deriveRoutePaymentState(computedTotalAmount, initialAmountPaid, null)
+        ? deriveRoutePaymentState(finalTotalAmount, initialAmountPaid, null)
         : 'unpaid';
     const initialLastPaymentDate =
       normalizedOrderType === 'route' ? new Date().toISOString() : null;
@@ -1698,6 +1725,12 @@ const guestCheckout = async (req, res) => {
         sales_rep_id,
         order_workflow_type,
         total_amount,
+        subtotal_amount,
+        discount_amount,
+        coupon_id,
+        coupon_code,
+        marketing_campaign_id,
+        coupon_discount_snapshot,
         amount_paid,
         last_payment_date,
         notes,
@@ -1705,7 +1738,7 @@ const guestCheckout = async (req, res) => {
         payment_state,
         is_printed
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, FALSE)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19, $20, $21, FALSE)
       RETURNING *
       `,
       [
@@ -1718,7 +1751,13 @@ const guestCheckout = async (req, res) => {
         normalizedAddress,
         effectiveSalesRepId || null,
         finalWorkflowType,
-        computedTotalAmount,
+        finalTotalAmount,
+        subtotalAmount,
+        discountAmount,
+        couponApplication?.coupon_id || null,
+        couponApplication?.coupon_code || null,
+        couponApplication?.campaign_id || null,
+        JSON.stringify(couponApplication || {}),
         initialAmountPaid,
         initialLastPaymentDate,
         normalizedNotes,
@@ -1728,6 +1767,17 @@ const guestCheckout = async (req, res) => {
     );
 
     const orderId = orderResult.rows[0].id;
+    if (couponApplication) {
+      await recordCouponRedemption(client, couponApplication, {
+        orderId,
+        orderNumber: orderNum,
+        customerId,
+        customerPhone: normalizedPhone,
+        orderType: normalizedOrderType,
+        requestId: req.requestId,
+      });
+    }
+
     const stockChanges = await reserveStockForOrder(client, preparedItems, orderId, {
       order_number: orderNum,
       order_type: normalizedOrderType,
@@ -1831,6 +1881,14 @@ const guestCheckout = async (req, res) => {
     if (err.isOrderValidationError) {
       return sendOrderValidationError(res, err);
     }
+    if (err.isCouponValidationError) {
+      return res.status(422).json({
+        success: false,
+        error: err.message,
+        code: err.code || 'COUPON_NOT_APPLICABLE',
+        ...(err.details ? { details: err.details } : {}),
+      });
+    }
     console.error('guestCheckout error:', err.message);
     return handleError(res, 500, 'Failed to place order', err);
   } finally {
@@ -1859,6 +1917,9 @@ const createOrder = async (req, res) => {
       total_amount,
       notes,
       items,
+      coupon_code,
+      promo_code,
+      
       amount_paid,
       due_date,
     } = req.body;
@@ -1877,6 +1938,7 @@ const createOrder = async (req, res) => {
     const normalizedRouteArea = normalizeText(route_area);
     const normalizedRouteNotes = normalizeText(route_notes);
     const normalizedNotes = normalizeText(notes);
+    const normalizedCouponCode = normalizeCouponCode(coupon_code || promo_code);
     const normalizedDueDate = due_date && due_date !== '' ? due_date : null;
     const requestedWorkflowType = normalizeWorkflowType(order_workflow_type);
 
@@ -2061,6 +2123,7 @@ const createOrder = async (req, res) => {
         price_source: priceSource,
 
         product_name: product.name,
+        category_id: product.category_id || null,
         stock_source: product.stock_source || 'product',
         stock_pool_id: product.stock_pool_id || null,
         stock_pool_name: product.stock_pool_name || null,
@@ -2069,12 +2132,28 @@ const createOrder = async (req, res) => {
 
     computedTotalAmount = roundMoney(computedTotalAmount);
 
-    const submittedTotalAmount = toNumber(total_amount, computedTotalAmount);
+    const couponApplication = normalizedCouponCode
+      ? await validateCouponForOrder(
+          client,
+          {
+            couponCode: normalizedCouponCode,
+            orderType: normalizedOrderType,
+            customerId: resolvedCustomerId,
+            customerPhone: normalizedCustomerPhone,
+            subtotalAmount: computedTotalAmount,
+            items: preparedItems,
+          },
+          { lock: true }
+        )
+      : null;
+    const subtotalAmount = computedTotalAmount;
+    const discountAmount = couponApplication ? couponApplication.discount_amount : 0;
+    const finalTotalAmount = couponApplication ? couponApplication.final_total_amount : subtotalAmount;
+
+    const submittedTotalAmount = toNumber(total_amount, finalTotalAmount);
     if (!Number.isFinite(submittedTotalAmount) || submittedTotalAmount < 0) {
       throw new Error('total_amount must be a valid non-negative number');
     }
-
-    const finalTotalAmount = computedTotalAmount;
 
     const initialAmountPaid =
       normalizedOrderType === 'route'
@@ -2127,6 +2206,12 @@ const createOrder = async (req, res) => {
         sales_rep_id,
         order_workflow_type,
         total_amount,
+        subtotal_amount,
+        discount_amount,
+        coupon_id,
+        coupon_code,
+        marketing_campaign_id,
+        coupon_discount_snapshot,
         amount_paid,
         due_date,
         last_payment_date,
@@ -2135,7 +2220,7 @@ const createOrder = async (req, res) => {
         payment_state,
         is_printed
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, FALSE)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, $16, $17, $18, $19, $20, FALSE)
       RETURNING *
       `,
       [
@@ -2147,6 +2232,12 @@ const createOrder = async (req, res) => {
         effectiveSalesRepId || null,
         finalWorkflowType,
         finalTotalAmount,
+        subtotalAmount,
+        discountAmount,
+        couponApplication?.coupon_id || null,
+        couponApplication?.coupon_code || null,
+        couponApplication?.campaign_id || null,
+        JSON.stringify(couponApplication || {}),
         initialAmountPaid,
         normalizedDueDate,
         initialLastPaymentDate,
@@ -2157,6 +2248,17 @@ const createOrder = async (req, res) => {
     );
 
     const orderId = orderResult.rows[0].id;
+    if (couponApplication) {
+      await recordCouponRedemption(client, couponApplication, {
+        orderId,
+        orderNumber: orderNum,
+        customerId: resolvedCustomerId,
+        customerPhone: normalizedCustomerPhone,
+        orderType: normalizedOrderType,
+        requestId: req.requestId,
+      });
+    }
+
     const stockChanges = await reserveStockForOrder(client, preparedItems, orderId, {
       order_number: orderNum,
       order_type: normalizedOrderType,
@@ -2267,6 +2369,14 @@ const createOrder = async (req, res) => {
     await client.query('ROLLBACK');
     if (err.isOrderValidationError) {
       return sendOrderValidationError(res, err);
+    }
+    if (err.isCouponValidationError) {
+      return res.status(422).json({
+        success: false,
+        error: err.message,
+        code: err.code || 'COUPON_NOT_APPLICABLE',
+        ...(err.details ? { details: err.details } : {}),
+      });
     }
     console.error('createOrder error:', err.message);
     return handleError(res, 500, 'Failed to create order', err);

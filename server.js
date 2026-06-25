@@ -53,6 +53,7 @@ const pricingRoutes = require('./routes/pricing');
 const pricingRulesRoutes = require('./routes/pricingRules');
 const pricingGroupsRoutes = require('./routes/pricingGroups');
 const storefrontRoutes = require('./routes/storefront');
+const marketingRoutes = require('./routes/marketing');
 
 const app = express();
 const httpServer = http.createServer(app);
@@ -270,6 +271,7 @@ app.use('/api/terms', termsRoutes);
 app.use('/api/pricing', pricingRoutes);
 app.use('/api/pricing-rules', pricingRulesRoutes);
 app.use('/api/pricing-groups', pricingGroupsRoutes);
+app.use('/api/marketing', marketingRoutes);
 
 // =====================================================
 // ERROR HANDLERS
