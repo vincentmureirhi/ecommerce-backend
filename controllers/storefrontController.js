@@ -447,5 +447,6 @@ module.exports = {
   listStorefrontProducts,
   listFeaturedStorefrontProducts,
   searchStorefrontProducts,
+  getStorefrontProductById,
   listStorefrontCategories,
 };
