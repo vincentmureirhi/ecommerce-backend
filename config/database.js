@@ -28,6 +28,7 @@ function envInt(name, defaultValue, options = {}) {
 }
 
 const logConnections = envFlag('DB_LOG_CONNECTIONS', false);
+const applicationName = process.env.DB_APPLICATION_NAME || 'xpose-backend';
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -77,5 +78,13 @@ pool.on('error', (err) => {
     process.exit(1);
   }
 })();
+
+pool.getPoolStats = () => ({
+  total: pool.totalCount,
+  idle: pool.idleCount,
+  waiting: pool.waitingCount,
+  max: pool.options.max,
+  min: pool.options.min || 0,
+});
 
 module.exports = pool;

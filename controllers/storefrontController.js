@@ -14,6 +14,13 @@ function addParam(params, value) {
   return `$${params.length}`;
 }
 
+function setPublicCache(res, maxAgeSeconds = 30, staleSeconds = 120) {
+  res.set(
+    'Cache-Control',
+    `public, max-age=${maxAgeSeconds}, stale-while-revalidate=${staleSeconds}`
+  );
+}
+
 function buildPublicProductFilters(query, params) {
   const where = [
     'COALESCE(p.is_active, TRUE) = TRUE',
@@ -254,7 +261,8 @@ async function listStorefrontProducts(req, res) {
     const offset = (page - 1) * limit;
     const filterParams = [];
     const { where, priceExpression } = buildPublicProductFilters(req.query, filterParams);
-    const orderBy = getSortClause(req.query.sort, priceExpression);
+    const cleanSearch = String(req.query.search || req.query.q || '').trim();
+    let orderBy = getSortClause(req.query.sort, priceExpression);
 
     const countResult = await pool.query(
       `
@@ -265,7 +273,21 @@ async function listStorefrontProducts(req, res) {
       filterParams
     );
 
-    const productParams = [...filterParams, limit, offset];
+    const productParams = [...filterParams];
+
+    if (cleanSearch && (!req.query.sort || String(req.query.sort).toLowerCase() === 'featured')) {
+      const prefixParam = addParam(productParams, `${cleanSearch}%`);
+      orderBy = `
+        CASE
+          WHEN p.name ILIKE ${prefixParam} THEN 0
+          WHEN p.sku ILIKE ${prefixParam} THEN 1
+          ELSE 2
+        END ASC,
+        ${orderBy}
+      `;
+    }
+
+    productParams.push(limit, offset);
     const limitParam = `$${productParams.length - 1}`;
     const offsetParam = `$${productParams.length}`;
 
@@ -285,6 +307,8 @@ async function listStorefrontProducts(req, res) {
     const total = Number(countResult.rows[0]?.total || 0);
     const totalPages = Math.max(1, Math.ceil(total / limit));
 
+    setPublicCache(res, cleanSearch ? 10 : 30, 120);
+
     return res.json({
       success: true,
       data: productResult.rows,
@@ -295,9 +319,11 @@ async function listStorefrontProducts(req, res) {
         totalPages,
         hasNext: page < totalPages,
         hasPrev: page > 1,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1,
       },
       meta: {
-        search: String(req.query.search || req.query.q || '').trim(),
+        search: cleanSearch,
         category: req.query.category || 'all',
         sort: req.query.sort || 'featured',
         requestId: req.requestId,
@@ -330,6 +356,46 @@ async function searchStorefrontProducts(req, res) {
   return listStorefrontProducts(req, res);
 }
 
+async function getStorefrontProductById(req, res) {
+  try {
+    const productId = Number(req.params.id);
+    if (!Number.isInteger(productId) || productId <= 0) {
+      return handleError(res, 400, 'Invalid product id');
+    }
+
+    const params = [];
+    const { where } = buildPublicProductFilters({}, params);
+    where.push(`p.id = ${addParam(params, productId)}`);
+
+    const result = await pool.query(
+      `
+      ${productSelect}
+      ${productFromClause}
+      ${productJoinSuffix}
+      WHERE ${where.join(' AND ')}
+      LIMIT 1
+      `,
+      params
+    );
+
+    if (!result.rows[0]) {
+      return handleError(res, 404, 'Product not found');
+    }
+
+    setPublicCache(res, 30, 120);
+
+    return res.json({
+      success: true,
+      data: result.rows[0],
+      meta: {
+        requestId: req.requestId,
+      },
+    });
+  } catch (err) {
+    console.error('getStorefrontProductById error:', err.message);
+    return handleError(res, 500, 'Failed to load storefront product', err);
+  }
+}
 async function listStorefrontCategories(req, res) {
   try {
     const result = await pool.query(
@@ -360,6 +426,8 @@ async function listStorefrontCategories(req, res) {
       ORDER BY c.name ASC
       `
     );
+
+    setPublicCache(res, 300, 600);
 
     return res.json({
       success: true,

@@ -223,6 +223,7 @@ app.get('/api/health', async (req, res) => {
       success: true,
       db: true,
       timestamp: result.rows[0].now,
+      pool: typeof pool.getPoolStats === 'function' ? pool.getPoolStats() : undefined,
       requestId: req.requestId,
     });
 
