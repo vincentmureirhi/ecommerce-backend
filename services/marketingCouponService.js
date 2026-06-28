@@ -43,11 +43,17 @@ function isInWindow(row) {
 }
 
 function normalizeItem(item) {
+  const quantity = Math.max(0, toNumber(item.quantity, 0));
+  const suppliedLineTotal = item.line_total ?? item.total_price;
+  const unitPrice = roundMoney(item.unit_price ?? item.price_at_purchase ?? item.price ?? 0);
+
   return {
     product_id: Number(item.product_id),
     category_id: item.category_id == null || item.category_id === '' ? null : Number(item.category_id),
-    quantity: Math.max(0, toNumber(item.quantity, 0)),
-    line_total: roundMoney(item.line_total ?? item.total_price ?? 0),
+    quantity,
+    line_total: suppliedLineTotal == null
+      ? roundMoney(quantity * unitPrice)
+      : roundMoney(suppliedLineTotal),
   };
 }
 
