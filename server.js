@@ -18,6 +18,7 @@ const { autoFailStalePendingPayments } = require('./jobs/paymentAutoFail');
 const { autoProgressOrders } = require('./jobs/orderProgressionJob');
 const { processQueuedSmsNotifications } = require('./jobs/smsOutboxJob');
 const { processQueuedOrderEvents } = require('./jobs/orderEventOutboxJob');
+const { runMarketingAutomation } = require('./jobs/marketingAutomationJob');
 const { apiRateLimiter } = require('./middleware/rateLimitMiddleware');
 const { requestContextMiddleware } = require('./middleware/requestContextMiddleware');
 const { handleError } = require('./utils/errorHandler');
@@ -336,6 +337,17 @@ if (envFlag('RUN_BACKGROUND_JOBS', true)) {
       }
     },
     envInt('SMS_JOB_INTERVAL_MS', 60000, { min: 5000 })
+  );
+
+  scheduleRepeatingJob(
+    'Marketing automation',
+    async () => {
+      const result = await runMarketingAutomation();
+      if (result.processed) {
+        console.log('Marketing automation result:', result);
+      }
+    },
+    envInt('MARKETING_AUTOMATION_INTERVAL_MS', 300000, { min: 60000 })
   );
 
   scheduleRepeatingJob(

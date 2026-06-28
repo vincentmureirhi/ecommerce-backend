@@ -75,6 +75,7 @@ function getSmsConfig() {
     enabled: envFlag('SMS_ENABLED', false),
     dryRun: envFlag('SMS_DRY_RUN', false),
     paymentConfirmationEnabled: envFlag('SMS_PAYMENT_CONFIRMATION_ENABLED', false),
+    marketingEnabled: envFlag('SMS_MARKETING_ENABLED', false),
     username: process.env.AFRICASTALKING_USERNAME,
     apiKey: process.env.AFRICASTALKING_API_KEY,
     senderId: process.env.AFRICASTALKING_SENDER_ID || null,
@@ -89,8 +90,12 @@ async function enqueueSms(db, payload) {
   const config = getSmsConfig();
   const phone = normalizeSmsPhone(payload.phone);
 
-  if (!config.paymentConfirmationEnabled) {
+  const feature = payload.feature || 'payment';
+  if (feature === 'payment' && !config.paymentConfirmationEnabled) {
     return { queued: false, reason: 'sms_payment_confirmation_disabled' };
+  }
+  if (feature === 'marketing' && !config.marketingEnabled) {
+    return { queued: false, reason: 'sms_marketing_disabled' };
   }
 
   if (!phone) {
@@ -136,6 +141,19 @@ async function enqueueSms(db, payload) {
   return { queued: true, id: result.rows[0].id };
 }
 
+async function enqueueMarketingSms(db, payload = {}) {
+  if (!payload.campaignId || !payload.customerId) {
+    return { queued: false, reason: 'missing_marketing_recipient' };
+  }
+
+  return enqueueSms(db, {
+    feature: 'marketing',
+    eventType: 'marketing_campaign',
+    dedupeKey: `marketing:campaign:${payload.campaignId}:customer:${payload.customerId}`,
+    phone: payload.phone,
+    message: payload.message,
+  });
+}
 async function enqueuePaymentConfirmedSms(db, order, options = {}) {
   if (!order || !order.id) {
     return { queued: false, reason: 'missing_order' };
@@ -443,6 +461,7 @@ async function processSmsOutboxBatch(options = {}) {
 module.exports = {
   buildPaymentConfirmedMessage,
   enqueuePaymentConfirmedSms,
+  enqueueMarketingSms,
   normalizeSmsPhone,
   processSmsOutboxBatch,
 };

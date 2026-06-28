@@ -20,7 +20,8 @@ const {
   normalizeCouponCode,
   validateCouponForOrder,
   recordCouponRedemption,
-} = require('../services/marketingCouponService');
+} = require('../services/marketingCouponService');const { awardRouteOrderPoints } = require('../services/routeMarketingService');
+
 
 /**
  * Business-rule validation error for order creation.
@@ -1777,6 +1778,14 @@ const guestCheckout = async (req, res) => {
         requestId: req.requestId,
       });
     }
+    if (normalizedOrderType === 'route' && customerId) {
+      await awardRouteOrderPoints(client, {
+        customerId,
+        orderId,
+        orderAmount: finalTotalAmount,
+        salesRepId: effectiveSalesRepId || null,
+      });
+    }
 
     const stockChanges = await reserveStockForOrder(client, preparedItems, orderId, {
       order_number: orderNum,
@@ -2256,6 +2265,14 @@ const createOrder = async (req, res) => {
         customerPhone: normalizedCustomerPhone,
         orderType: normalizedOrderType,
         requestId: req.requestId,
+      });
+    }
+    if (normalizedOrderType === 'route' && resolvedCustomerId) {
+      await awardRouteOrderPoints(client, {
+        customerId: resolvedCustomerId,
+        orderId,
+        orderAmount: finalTotalAmount,
+        salesRepId: effectiveSalesRepId || null,
       });
     }
 

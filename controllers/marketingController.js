@@ -46,6 +46,17 @@ function normalizeStatus(value, fallback = 'draft') {
   return status || fallback;
 }
 
+function normalizeBoolean(value, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
+}
+
+function normalizeIdList(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map(Number).filter((id) => Number.isInteger(id) && id > 0))];
+}
+
 const listPublicCampaigns = async (req, res) => {
   try {
     const limit = toPositiveInteger(req.query.limit, 6, { min: 1, max: 20 });
@@ -70,7 +81,10 @@ const listPublicCampaigns = async (req, res) => {
             ORDER BY c.id ASC
           ) FILTER (WHERE c.id IS NOT NULL),
           '[]'::json
-        ) AS coupons
+        ) AS coupons,
+        COALESCE((SELECT json_agg(mcp.product_id ORDER BY mcp.product_id) FROM marketing_campaign_products mcp WHERE mcp.campaign_id = mc.id), '[]'::json) AS product_ids,
+        COALESCE((SELECT json_agg(mcc.category_id ORDER BY mcc.category_id) FROM marketing_campaign_categories mcc WHERE mcc.campaign_id = mc.id), '[]'::json) AS category_ids,
+        COALESCE((SELECT json_agg(mcr.region_id ORDER BY mcr.region_id) FROM marketing_campaign_regions mcr WHERE mcr.campaign_id = mc.id), '[]'::json) AS region_ids
       FROM marketing_campaigns mc
       LEFT JOIN coupons c
         ON c.campaign_id = mc.id
@@ -141,15 +155,22 @@ const listCampaigns = async (req, res) => {
       `
       SELECT
         mc.*,
-        COUNT(DISTINCT c.id)::int AS coupon_count,
-        COUNT(DISTINCT cr.id)::int AS redemption_count,
-        COALESCE(SUM(cr.discount_amount), 0)::numeric(12,2) AS discount_given,
-        COALESCE(SUM(cr.final_total_amount), 0)::numeric(12,2) AS attributed_revenue
+        COALESCE(coupon_stats.coupon_count, 0)::int AS coupon_count,
+        COALESCE(sales.redemption_count, 0)::int AS redemption_count,
+        COALESCE(sales.discount_given, 0)::numeric(12,2) AS discount_given,
+        COALESCE(sales.attributed_revenue, 0)::numeric(12,2) AS attributed_revenue
       FROM marketing_campaigns mc
-      LEFT JOIN coupons c ON c.campaign_id = mc.id
-      LEFT JOIN coupon_redemptions cr ON cr.campaign_id = mc.id AND cr.status = 'redeemed'
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS coupon_count FROM coupons c WHERE c.campaign_id = mc.id
+      ) coupon_stats ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS redemption_count,
+          SUM(cr.discount_amount) AS discount_given,
+          SUM(cr.final_total_amount) AS attributed_revenue
+        FROM coupon_redemptions cr
+        WHERE cr.campaign_id = mc.id AND cr.status = 'redeemed'
+      ) sales ON TRUE
       ${whereSql}
-      GROUP BY mc.id
       ORDER BY mc.created_at DESC
       LIMIT $${params.length - 1} OFFSET $${params.length}
       `,
@@ -185,11 +206,14 @@ const createCampaign = async (req, res) => {
       INSERT INTO marketing_campaigns
         (campaign_code, name, description, campaign_type, status, customer_scope,
          starts_at, ends_at, priority, hero_title, hero_subtitle, badge_label,
-         cta_label, cta_url, budget_amount, target_amount, metadata, created_by, updated_by,
+         cta_label, cta_url, budget_amount, target_amount, metadata,
+         placement, hero_image_url, accent_color, auto_activate, auto_expire,
+         sms_enabled, sms_message, sms_audience, created_by, updated_by,
          created_at, updated_at)
       VALUES
         ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-         $13, $14, $15, $16, $17::jsonb, $18, $18, NOW(), NOW())
+         $13, $14, $15, $16, $17::jsonb, $18, $19, $20, $21, $22,
+         $23, $24, $25, $26, $26, NOW(), NOW())
       RETURNING *
       `,
       [
@@ -210,6 +234,14 @@ const createCampaign = async (req, res) => {
         numberOrNull(body.budget_amount),
         numberOrNull(body.target_amount),
         JSON.stringify(body.metadata && typeof body.metadata === 'object' ? body.metadata : {}),
+        normalizeStatus(body.placement, 'home'),
+        normalizeText(body.hero_image_url),
+        normalizeText(body.accent_color),
+        normalizeBoolean(body.auto_activate, false),
+        normalizeBoolean(body.auto_expire, true),
+        normalizeBoolean(body.sms_enabled, false),
+        normalizeText(body.sms_message),
+        normalizeStatus(body.sms_audience, 'campaign_scope'),
         req.user?.id || null,
       ]
     );
@@ -248,6 +280,15 @@ const updateCampaign = async (req, res) => {
       cta_url: (v) => normalizeText(v),
       budget_amount: (v) => numberOrNull(v),
       target_amount: (v) => numberOrNull(v),
+      placement: (v) => normalizeStatus(v, 'home'),
+      hero_image_url: (v) => normalizeText(v),
+      accent_color: (v) => normalizeText(v),
+      auto_activate: (v) => normalizeBoolean(v, false),
+      auto_expire: (v) => normalizeBoolean(v, true),
+      sms_enabled: (v) => normalizeBoolean(v, false),
+      sms_message: (v) => normalizeText(v),
+      sms_audience: (v) => normalizeStatus(v, 'campaign_scope'),
+      sms_queued_at: (v) => normalizeDate(v),
       metadata: (v) => JSON.stringify(v && typeof v === 'object' ? v : {}),
     };
 
@@ -460,6 +501,274 @@ const updateCoupon = async (req, res) => {
   }
 };
 
+const trackCampaignEvent = async (req, res) => {
+  try {
+    const campaignId = Number(req.params.id);
+    const eventType = normalizeStatus(req.body?.event_type, 'impression');
+    if (!Number.isInteger(campaignId) || campaignId <= 0) return handleError(res, 400, 'Invalid campaign id');
+    if (!['impression', 'click'].includes(eventType)) return handleError(res, 400, 'Invalid campaign event type');
+
+    const sessionId = String(req.body?.session_id || '').trim().slice(0, 120) || null;
+    const sourcePath = String(req.body?.source_path || '').trim().slice(0, 500) || null;
+    const metadata = req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : {};
+    const result = await pool.query(
+      `
+      INSERT INTO marketing_campaign_events
+        (campaign_id, event_type, session_id, source_path, request_id, metadata, created_at)
+      SELECT mc.id, $2, $3, $4, $5, $6::jsonb, NOW()
+      FROM marketing_campaigns mc
+      WHERE mc.id = $1
+        AND mc.status = 'active'
+        AND (mc.starts_at IS NULL OR mc.starts_at <= NOW())
+        AND (mc.ends_at IS NULL OR mc.ends_at > NOW())
+        AND (
+          $3::text IS NULL
+          OR NOT EXISTS (
+            SELECT 1 FROM marketing_campaign_events existing
+            WHERE existing.campaign_id = mc.id
+              AND existing.event_type = $2
+              AND existing.session_id = $3
+              AND existing.created_at >= NOW() - INTERVAL '6 hours'
+          )
+        )
+      RETURNING id
+      `,
+      [campaignId, eventType, sessionId, sourcePath, req.requestId || null, JSON.stringify(metadata)]
+    );
+
+    return handleSuccess(res, 202, 'Campaign event accepted', { recorded: Boolean(result.rows[0]) });
+  } catch (err) {
+    console.error('trackCampaignEvent error:', err.message);
+    return handleError(res, 500, 'Failed to record campaign event', err);
+  }
+};
+
+const getCampaignTargets = async (req, res) => {
+  try {
+    const campaignId = Number(req.params.id);
+    if (!Number.isInteger(campaignId) || campaignId <= 0) return handleError(res, 400, 'Invalid campaign id');
+    const [campaign, products, categories, regions] = await Promise.all([
+      pool.query('SELECT id, name, campaign_code FROM marketing_campaigns WHERE id = $1', [campaignId]),
+      pool.query(`SELECT p.id, p.name, p.sku FROM marketing_campaign_products target INNER JOIN products p ON p.id = target.product_id WHERE target.campaign_id = $1 ORDER BY p.name`, [campaignId]),
+      pool.query(`SELECT c.id, c.name FROM marketing_campaign_categories target INNER JOIN categories c ON c.id = target.category_id WHERE target.campaign_id = $1 ORDER BY c.name`, [campaignId]),
+      pool.query(`SELECT r.id, r.name FROM marketing_campaign_regions target INNER JOIN regions r ON r.id = target.region_id WHERE target.campaign_id = $1 ORDER BY r.name`, [campaignId]),
+    ]);
+    if (!campaign.rows[0]) return handleError(res, 404, 'Marketing campaign not found');
+    return handleSuccess(res, 200, 'Campaign targets retrieved', {
+      campaign: campaign.rows[0],
+      products: products.rows,
+      categories: categories.rows,
+      regions: regions.rows,
+    });
+  } catch (err) {
+    console.error('getCampaignTargets error:', err.message);
+    return handleError(res, 500, 'Failed to retrieve campaign targets', err);
+  }
+};
+
+const replaceCampaignTargets = async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const campaignId = Number(req.params.id);
+    if (!Number.isInteger(campaignId) || campaignId <= 0) return handleError(res, 400, 'Invalid campaign id');
+    const productIds = normalizeIdList(req.body?.product_ids);
+    const categoryIds = normalizeIdList(req.body?.category_ids);
+    const regionIds = normalizeIdList(req.body?.region_ids);
+    await client.query('BEGIN');
+    const campaign = await client.query('SELECT id FROM marketing_campaigns WHERE id = $1 FOR UPDATE', [campaignId]);
+    if (!campaign.rows[0]) {
+      await client.query('ROLLBACK');
+      return handleError(res, 404, 'Marketing campaign not found');
+    }
+    await Promise.all([
+      client.query('DELETE FROM marketing_campaign_products WHERE campaign_id = $1', [campaignId]),
+      client.query('DELETE FROM marketing_campaign_categories WHERE campaign_id = $1', [campaignId]),
+      client.query('DELETE FROM marketing_campaign_regions WHERE campaign_id = $1', [campaignId]),
+    ]);
+    if (productIds.length) {
+      await client.query(`INSERT INTO marketing_campaign_products (campaign_id, product_id) SELECT $1, p.id FROM products p WHERE p.id = ANY($2::int[]) ON CONFLICT DO NOTHING`, [campaignId, productIds]);
+    }
+    if (categoryIds.length) {
+      await client.query(`INSERT INTO marketing_campaign_categories (campaign_id, category_id) SELECT $1, c.id FROM categories c WHERE c.id = ANY($2::int[]) ON CONFLICT DO NOTHING`, [campaignId, categoryIds]);
+    }
+    if (regionIds.length) {
+      await client.query(`INSERT INTO marketing_campaign_regions (campaign_id, region_id) SELECT $1, r.id FROM regions r WHERE r.id = ANY($2::int[]) ON CONFLICT DO NOTHING`, [campaignId, regionIds]);
+    }
+    const hasProductTargets = productIds.length > 0;
+    const hasCategoryTargets = categoryIds.length > 0;
+    await client.query(
+      `UPDATE coupons SET applies_to = $2, updated_at = NOW() WHERE campaign_id = $1`,
+      [campaignId, hasProductTargets || hasCategoryTargets ? 'campaign_targets' : 'all']
+    );
+    await client.query('COMMIT');
+    await logActivity(req.user?.id, 'replace_marketing_campaign_targets', 'marketing_campaign', campaignId, {
+      product_ids: productIds,
+      category_ids: categoryIds,
+      region_ids: regionIds,
+    }, { req });
+    req.params.id = String(campaignId);
+    return getCampaignTargets(req, res);
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('replaceCampaignTargets error:', err.message);
+    return handleError(res, 500, 'Failed to save campaign targets', err);
+  } finally {
+    client.release();
+  }
+};
+
+const getMarketingAnalytics = async (req, res) => {
+  try {
+    const days = toPositiveInteger(req.query.days, 30, { min: 1, max: 365 });
+    const [summary, campaigns, coupons, daily, automation] = await Promise.all([
+      pool.query(
+        `
+        SELECT
+          (SELECT COUNT(*) FROM marketing_campaigns WHERE status = 'active')::int AS active_campaigns,
+          (SELECT COUNT(*) FROM marketing_campaign_events WHERE event_type = 'impression' AND created_at >= NOW() - ($1::int * INTERVAL '1 day'))::int AS impressions,
+          (SELECT COUNT(*) FROM marketing_campaign_events WHERE event_type = 'click' AND created_at >= NOW() - ($1::int * INTERVAL '1 day'))::int AS clicks,
+          COUNT(cr.id)::int AS conversions,
+          COALESCE(SUM(cr.discount_amount), 0)::numeric(14,2) AS discount_given,
+          COALESCE(SUM(cr.final_total_amount), 0)::numeric(14,2) AS attributed_revenue,
+          COALESCE(AVG(cr.final_total_amount), 0)::numeric(14,2) AS average_order_value
+        FROM coupon_redemptions cr
+        WHERE cr.status = 'redeemed' AND cr.redeemed_at >= NOW() - ($1::int * INTERVAL '1 day')
+        `,
+        [days]
+      ),
+      pool.query(
+        `
+        SELECT mc.id, mc.name, mc.campaign_code, mc.status,
+          COALESCE(events.impressions, 0)::int AS impressions,
+          COALESCE(events.clicks, 0)::int AS clicks,
+          COALESCE(sales.conversions, 0)::int AS conversions,
+          COALESCE(sales.attributed_revenue, 0)::numeric(14,2) AS attributed_revenue,
+          COALESCE(sales.discount_given, 0)::numeric(14,2) AS discount_given
+        FROM marketing_campaigns mc
+        LEFT JOIN LATERAL (
+          SELECT
+            COUNT(*) FILTER (WHERE event_type = 'impression') AS impressions,
+            COUNT(*) FILTER (WHERE event_type = 'click') AS clicks
+          FROM marketing_campaign_events ev
+          WHERE ev.campaign_id = mc.id
+            AND ev.created_at >= NOW() - ($1::int * INTERVAL '1 day')
+        ) events ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT COUNT(*) AS conversions,
+            SUM(cr.final_total_amount) AS attributed_revenue,
+            SUM(cr.discount_amount) AS discount_given
+          FROM coupon_redemptions cr
+          WHERE cr.campaign_id = mc.id
+            AND cr.status = 'redeemed'
+            AND cr.redeemed_at >= NOW() - ($1::int * INTERVAL '1 day')
+        ) sales ON TRUE
+        ORDER BY attributed_revenue DESC, conversions DESC, clicks DESC
+        LIMIT 12
+        `,
+        [days]
+      ),
+      pool.query(
+        `
+        SELECT c.id, c.code, c.name, c.status, COUNT(cr.id)::int AS redemptions,
+          COALESCE(SUM(cr.discount_amount), 0)::numeric(14,2) AS discount_given,
+          COALESCE(SUM(cr.final_total_amount), 0)::numeric(14,2) AS attributed_revenue,
+          COALESCE(AVG(cr.final_total_amount), 0)::numeric(14,2) AS average_order_value
+        FROM coupons c
+        LEFT JOIN coupon_redemptions cr ON cr.coupon_id = c.id AND cr.status = 'redeemed' AND cr.redeemed_at >= NOW() - ($1::int * INTERVAL '1 day')
+        GROUP BY c.id
+        ORDER BY attributed_revenue DESC, redemptions DESC
+        LIMIT 12
+        `,
+        [days]
+      ),
+      pool.query(
+        `
+        SELECT day::date,
+          COALESCE(ev.impressions, 0)::int AS impressions,
+          COALESCE(ev.clicks, 0)::int AS clicks,
+          COALESCE(redemptions.conversions, 0)::int AS conversions,
+          COALESCE(redemptions.revenue, 0)::numeric(14,2) AS revenue
+        FROM generate_series(CURRENT_DATE - ($1::int - 1), CURRENT_DATE, INTERVAL '1 day') day
+        LEFT JOIN (
+          SELECT created_at::date AS day,
+            COUNT(*) FILTER (WHERE event_type = 'impression') AS impressions,
+            COUNT(*) FILTER (WHERE event_type = 'click') AS clicks
+          FROM marketing_campaign_events
+          WHERE created_at >= CURRENT_DATE - ($1::int - 1)
+          GROUP BY created_at::date
+        ) ev ON ev.day = day::date
+        LEFT JOIN (
+          SELECT redeemed_at::date AS day, COUNT(*) AS conversions, SUM(final_total_amount) AS revenue
+          FROM coupon_redemptions
+          WHERE status = 'redeemed' AND redeemed_at >= CURRENT_DATE - ($1::int - 1)
+          GROUP BY redeemed_at::date
+        ) redemptions ON redemptions.day = day::date
+        ORDER BY day
+        `,
+        [days]
+      ),
+      pool.query(`SELECT * FROM marketing_automation_runs ORDER BY started_at DESC LIMIT 10`),
+    ]);
+    const s = summary.rows[0] || {};
+    const impressions = Number(s.impressions || 0);
+    const clicks = Number(s.clicks || 0);
+    const conversions = Number(s.conversions || 0);
+    return handleSuccess(res, 200, 'Marketing analytics retrieved', {
+      period_days: days,
+      summary: {
+        ...s,
+        click_through_rate: impressions > 0 ? Number(((clicks / impressions) * 100).toFixed(2)) : 0,
+        conversion_rate: clicks > 0 ? Number(((conversions / clicks) * 100).toFixed(2)) : 0,
+      },
+      top_campaigns: campaigns.rows,
+      top_coupons: coupons.rows,
+      daily: daily.rows,
+      automation_runs: automation.rows,
+    });
+  } catch (err) {
+    console.error('getMarketingAnalytics error:', err.message);
+    return handleError(res, 500, 'Failed to retrieve marketing analytics', err);
+  }
+};
+
+const listReferralCodes = async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT rc.*, sr.name AS sales_rep_name, sr.phone_number,
+        COUNT(ref.id)::int AS applications,
+        COUNT(ref.id) FILTER (WHERE ref.status IN ('approved', 'rewarded'))::int AS approved_referrals
+      FROM sales_rep_referral_codes rc
+      INNER JOIN sales_reps sr ON sr.id = rc.sales_rep_id
+      LEFT JOIN route_customer_referrals ref ON ref.referral_code_id = rc.id
+      GROUP BY rc.id, sr.id
+      ORDER BY approved_referrals DESC, applications DESC, sr.name
+      `
+    );
+    return handleSuccess(res, 200, 'Sales rep referral codes retrieved', result.rows);
+  } catch (err) {
+    console.error('listReferralCodes error:', err.message);
+    return handleError(res, 500, 'Failed to retrieve referral codes', err);
+  }
+};
+
+const ensureReferralCodes = async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      INSERT INTO sales_rep_referral_codes (sales_rep_id, code, created_at, updated_at)
+      SELECT sr.id, 'XPOSE-REP-' || sr.id::text, NOW(), NOW()
+      FROM sales_reps sr
+      ON CONFLICT (sales_rep_id) DO NOTHING
+      RETURNING id
+      `
+    );
+    return handleSuccess(res, 200, 'Referral codes synchronized', { created: result.rowCount || 0 });
+  } catch (err) {
+    console.error('ensureReferralCodes error:', err.message);
+    return handleError(res, 500, 'Failed to synchronize referral codes', err);
+  }
+};
 module.exports = {
   listPublicCampaigns,
   validateCoupon,
@@ -469,4 +778,10 @@ module.exports = {
   listCoupons,
   createCoupon,
   updateCoupon,
+  trackCampaignEvent,
+  getCampaignTargets,
+  replaceCampaignTargets,
+  getMarketingAnalytics,
+  listReferralCodes,
+  ensureReferralCodes,
 };

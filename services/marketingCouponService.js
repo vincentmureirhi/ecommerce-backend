@@ -234,6 +234,17 @@ async function validateCouponForOrder(client, input = {}, options = {}) {
 
   const targets = await loadCampaignTargets(client, coupon.campaign_id);
   const normalizedItems = Array.isArray(input.items) ? input.items.map(normalizeItem) : [];
+  if (targets.categoryIds.size > 0 && normalizedItems.length > 0) {
+    const productIds = normalizedItems.map((item) => item.product_id).filter(Number.isFinite);
+    const categoryRows = await client.query(
+      `SELECT id, category_id FROM products WHERE id = ANY($1::int[])`,
+      [productIds]
+    );
+    const categoryByProduct = new Map(categoryRows.rows.map((row) => [Number(row.id), row.category_id == null ? null : Number(row.category_id)]));
+    normalizedItems.forEach((item) => {
+      if (categoryByProduct.has(item.product_id)) item.category_id = categoryByProduct.get(item.product_id);
+    });
+  }
   const hasTargets = targets.productIds.size > 0 || targets.categoryIds.size > 0;
   const eligibleItems = normalizedItems.length
     ? normalizedItems.filter((item) => itemMatchesTargets(item, targets))
@@ -315,6 +326,27 @@ async function recordCouponRedemption(client, validation, order = {}) {
       [validation.coupon_id, order.orderId]
     );
     return existing.rows[0] || null;
+  }
+
+  if (validation.campaign_id) {
+    await client.query(
+      `
+      INSERT INTO marketing_campaign_events
+        (campaign_id, event_type, order_id, customer_id, request_id, metadata, created_at)
+      SELECT $1, 'conversion', $2, $3, $4, $5::jsonb, NOW()
+      WHERE NOT EXISTS (
+        SELECT 1 FROM marketing_campaign_events
+        WHERE campaign_id = $1 AND event_type = 'conversion' AND order_id = $2
+      )
+      `,
+      [
+        validation.campaign_id,
+        order.orderId,
+        order.customerId || null,
+        order.requestId || null,
+        JSON.stringify({ coupon_code: validation.coupon_code, final_total_amount: validation.final_total_amount }),
+      ]
+    );
   }
 
   await client.query(

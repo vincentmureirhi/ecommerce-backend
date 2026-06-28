@@ -3,6 +3,7 @@
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const pool = require('../config/database');
+const { recordRouteApplicationReferral } = require('../services/routeMarketingService');
 const {
   logRouteCustomerApplicationEvent,
   listRouteCustomerApplicationEvents,
@@ -572,6 +573,8 @@ const submitApplication = async (req, res) => {
       requested_credit_limit,
       submitted_via,
       form_reference,
+      referral_code,
+      marketing_sms_opt_in,
     } = req.body;
 
     if (!applicant_name || !String(applicant_name).trim()) {
@@ -612,6 +615,7 @@ const submitApplication = async (req, res) => {
         requested_credit_limit,
         submitted_via,
         form_reference,
+        marketing_sms_opt_in,
         status,
         review_stage,
         received_email_from,
@@ -619,7 +623,7 @@ const submitApplication = async (req, res) => {
         created_at,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', 'received', $11, $12, NOW(), NOW())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', 'received', $12, $13, NOW(), NOW())
       RETURNING *
       `,
       [
@@ -633,10 +637,18 @@ const submitApplication = async (req, res) => {
         numericCreditLimit,
         submittedVia,
         form_reference ? String(form_reference).trim() : null,
+        marketing_sms_opt_in === true,
         submittedVia === 'email' ? String(email).trim().toLowerCase() : null,
         submittedVia === 'email' ? new Date().toISOString() : null,
       ]
     );
+
+    const referral = referral_code
+      ? await recordRouteApplicationReferral(pool, {
+          applicationId: result.rows[0].id,
+          referralCode: referral_code,
+        })
+      : null;
 
     await logRouteCustomerApplicationEvent(pool, {
       applicationId: result.rows[0].id,
@@ -650,6 +662,9 @@ const submitApplication = async (req, res) => {
         business_name: result.rows[0].business_name,
         email: result.rows[0].email,
         requested_credit_limit: result.rows[0].requested_credit_limit,
+        marketing_sms_opt_in: result.rows[0].marketing_sms_opt_in,
+        referral_code: referral?.code || null,
+        referred_by_sales_rep_id: referral?.sales_rep_id || null,
       },
     });
 
@@ -1048,6 +1063,12 @@ const approveApplication = async (req, res) => {
         await client.query('ROLLBACK');
         return fail(res, 400, 'Selected customer must be a route customer');
       }
+      if (application.marketing_sms_opt_in === true) {
+        await client.query(
+          `UPDATE customers SET marketing_sms_opt_in = TRUE, marketing_sms_opted_in_at = COALESCE(marketing_sms_opted_in_at, NOW()), updated_at = NOW() WHERE id = $1`,
+          [routeCustomerId]
+        );
+      }
     } else {
       const insertedCustomer = await client.query(
         `
@@ -1059,11 +1080,13 @@ const approveApplication = async (req, res) => {
           address,
           customer_type,
           location_id,
+          marketing_sms_opt_in,
+          marketing_sms_opted_in_at,
           is_active,
           created_at,
           updated_at
         )
-        VALUES ($1, $2, $3, $4, 'route', $5, TRUE, NOW(), NOW())
+        VALUES ($1, $2, $3, $4, 'route', $5, $6, CASE WHEN $6 THEN NOW() ELSE NULL END, TRUE, NOW(), NOW())
         RETURNING id, name, email, phone, customer_type, is_active
         `,
         [
@@ -1072,6 +1095,7 @@ const approveApplication = async (req, res) => {
           application.phone,
           application.address || null,
           application.location_id || null,
+          application.marketing_sms_opt_in === true,
         ]
       );
 
@@ -1111,6 +1135,17 @@ const approveApplication = async (req, res) => {
         admin_notes || null,
         applicationId,
       ]
+    );
+
+    await client.query(
+      `
+      UPDATE route_customer_referrals
+      SET referred_customer_id = $1,
+          status = 'approved',
+          updated_at = NOW()
+      WHERE application_id = $2
+      `,
+      [routeCustomerId, applicationId]
     );
 
     await logRouteCustomerApplicationEvent(client, {
@@ -2201,6 +2236,74 @@ const getRouteCustomerDashboard = async (req, res) => {
       [customerId]
     );
 
+    const rewardsResult = await pool.query(
+      `
+      SELECT points_balance, lifetime_points, tier, last_earned_at, updated_at
+      FROM route_customer_reward_accounts
+      WHERE customer_id = $1
+      LIMIT 1
+      `,
+      [customerId]
+    );
+
+    const rewardLedgerResult = await pool.query(
+      `
+      SELECT id, order_id, points, entry_type, description, created_at
+      FROM route_customer_reward_ledger
+      WHERE customer_id = $1
+      ORDER BY created_at DESC
+      LIMIT 8
+      `,
+      [customerId]
+    );
+
+    const regionalOffersResult = await pool.query(
+      `
+      SELECT mc.id, mc.campaign_code, mc.name, mc.description, mc.hero_title,
+        mc.hero_subtitle, mc.badge_label, mc.cta_label, mc.cta_url,
+        mc.hero_image_url, mc.accent_color, mc.starts_at, mc.ends_at,
+        COALESCE((
+          SELECT json_agg(json_build_object(
+            'code', c.code,
+            'name', c.name,
+            'discount_type', c.discount_type,
+            'discount_value', c.discount_value,
+            'min_order_amount', c.min_order_amount
+          ) ORDER BY c.id)
+          FROM coupons c
+          WHERE c.campaign_id = mc.id
+            AND c.status = 'active'
+            AND (c.starts_at IS NULL OR c.starts_at <= NOW())
+            AND (c.ends_at IS NULL OR c.ends_at > NOW())
+        ), '[]'::json) AS coupons
+      FROM marketing_campaigns mc
+      WHERE mc.status = 'active'
+        AND mc.customer_scope IN ('all', 'route')
+        AND mc.placement IN ('route_portal', 'all')
+        AND (mc.starts_at IS NULL OR mc.starts_at <= NOW())
+        AND (mc.ends_at IS NULL OR mc.ends_at > NOW())
+        AND (
+          NOT EXISTS (SELECT 1 FROM marketing_campaign_regions mcr WHERE mcr.campaign_id = mc.id)
+          OR $1::int IN (SELECT region_id FROM marketing_campaign_regions WHERE campaign_id = mc.id)
+        )
+      ORDER BY mc.priority DESC, mc.created_at DESC
+      LIMIT 6
+      `,
+      [summary.region_id || null]
+    );
+
+    const referralCodeResult = await pool.query(
+      `
+      SELECT rc.code, rc.reward_points, sr.name AS sales_rep_name
+      FROM customers c
+      INNER JOIN sales_rep_referral_codes rc ON rc.sales_rep_id = c.sales_rep_id AND rc.is_active = TRUE
+      INNER JOIN sales_reps sr ON sr.id = rc.sales_rep_id
+      WHERE c.id = $1
+      LIMIT 1
+      `,
+      [customerId]
+    );
+
     const creditLimitValue = Number(summary.credit_limit || 0);
     const availableCreditValue = Number(summary.available_credit || 0);
     const currentBalanceValue = Number(summary.current_balance || 0);
@@ -2258,6 +2361,12 @@ const getRouteCustomerDashboard = async (req, res) => {
       region_rank: regionRankRows[0] || null,
       top_products: topProductsResult.rows,
       recent_credit_requests: creditRequestsResult.rows,
+      route_rewards: {
+        account: rewardsResult.rows[0] || { points_balance: 0, lifetime_points: 0, tier: 'starter' },
+        recent_activity: rewardLedgerResult.rows,
+      },
+      regional_offers: regionalOffersResult.rows,
+      referral: referralCodeResult.rows[0] || null,
       portal_notices: portalNotices,
       assigned_sales_rep: assignedRepResult.rows[0] || null,
       served_by_sales_reps: servedByRepsResult.rows,
