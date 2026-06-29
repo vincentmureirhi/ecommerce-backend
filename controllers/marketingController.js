@@ -683,12 +683,16 @@ const getMarketingAnalytics = async (req, res) => {
       ),
       pool.query(
         `
-        SELECT day::date,
+        SELECT calendar.day_value::date AS day,
           COALESCE(ev.impressions, 0)::int AS impressions,
           COALESCE(ev.clicks, 0)::int AS clicks,
           COALESCE(redemptions.conversions, 0)::int AS conversions,
           COALESCE(redemptions.revenue, 0)::numeric(14,2) AS revenue
-        FROM generate_series(CURRENT_DATE - ($1::int - 1), CURRENT_DATE, INTERVAL '1 day') day
+        FROM generate_series(
+          CURRENT_DATE - ($1::int - 1),
+          CURRENT_DATE,
+          INTERVAL '1 day'
+        ) AS calendar(day_value)
         LEFT JOIN (
           SELECT created_at::date AS day,
             COUNT(*) FILTER (WHERE event_type = 'impression') AS impressions,
@@ -696,14 +700,14 @@ const getMarketingAnalytics = async (req, res) => {
           FROM marketing_campaign_events
           WHERE created_at >= CURRENT_DATE - ($1::int - 1)
           GROUP BY created_at::date
-        ) ev ON ev.day = day::date
+        ) ev ON ev.day = calendar.day_value::date
         LEFT JOIN (
           SELECT redeemed_at::date AS day, COUNT(*) AS conversions, SUM(final_total_amount) AS revenue
           FROM coupon_redemptions
           WHERE status = 'redeemed' AND redeemed_at >= CURRENT_DATE - ($1::int - 1)
           GROUP BY redeemed_at::date
-        ) redemptions ON redemptions.day = day::date
-        ORDER BY day
+        ) redemptions ON redemptions.day = calendar.day_value::date
+        ORDER BY calendar.day_value
         `,
         [days]
       ),
