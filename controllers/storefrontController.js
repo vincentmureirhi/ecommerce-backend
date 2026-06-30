@@ -109,6 +109,32 @@ function buildPublicProductFilters(query, params) {
   return { where, priceExpression };
 }
 
+function getStockAvailabilitySortClause() {
+  return `
+    CASE
+      WHEN COALESCE(NULLIF(p.stock_status_override, ''), CASE
+        WHEN COALESCE(p.stock_source, 'product') = 'pool' AND NULLIF(sp.stock_status_override, '') IS NOT NULL
+          THEN sp.stock_status_override
+        WHEN (
+          CASE
+            WHEN COALESCE(p.stock_source, 'product') = 'pool' THEN COALESCE(sp.total_stock, 0)
+            ELSE COALESCE(p.current_stock, 0)
+          END
+        ) <= 0 THEN 'out_of_stock'
+        WHEN (
+          CASE
+            WHEN COALESCE(p.stock_source, 'product') = 'pool' THEN COALESCE(sp.total_stock, 0)
+            ELSE COALESCE(p.current_stock, 0)
+          END
+        ) <= GREATEST(COALESCE(p.min_order_qty, 1), COALESCE(p.reorder_level, sp.reorder_level, 10), 10)
+          THEN 'limited_stock'
+        ELSE 'in_stock'
+      END) = 'out_of_stock' THEN 1
+      ELSE 0
+    END ASC
+  `;
+}
+
 function getSortClause(sort, priceExpression) {
   switch (String(sort || '').toLowerCase()) {
     case 'price-asc':
@@ -297,7 +323,7 @@ async function listStorefrontProducts(req, res) {
       ${productFromClause}
       ${productJoinSuffix}
       WHERE ${where.join(' AND ')}
-      ORDER BY ${orderBy}
+      ORDER BY ${getStockAvailabilitySortClause()}, ${orderBy}
       LIMIT ${limitParam}
       OFFSET ${offsetParam}
       `,
