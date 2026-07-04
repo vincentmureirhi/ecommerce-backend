@@ -1701,16 +1701,13 @@ const guestCheckout = async (req, res) => {
       (normalizedOrderType === 'route'
         ? (effectiveSalesRepId ? 'route_sales_rep_capture' : 'route_self_service')
         : 'normal_self_service');
-    const initialAmountPaid =
-      normalizedOrderType === 'route' ? finalTotalAmount : 0;
-    const initialPaymentStatus =
-      normalizedOrderType === 'route' ? 'completed' : 'pending';
+    const initialAmountPaid = 0;
+    const initialPaymentStatus = 'pending';
     const initialPaymentState =
       normalizedOrderType === 'route'
         ? deriveRoutePaymentState(finalTotalAmount, initialAmountPaid, null)
         : 'unpaid';
-    const initialLastPaymentDate =
-      normalizedOrderType === 'route' ? new Date().toISOString() : null;
+    const initialLastPaymentDate = null;
 
     const orderResult = await client.query(
       `
@@ -2164,16 +2161,10 @@ const createOrder = async (req, res) => {
       throw new Error('total_amount must be a valid non-negative number');
     }
 
-    const initialAmountPaid =
-      normalizedOrderType === 'route'
-        ? finalTotalAmount
-        : roundMoney(submittedAmountPaid);
+    const initialAmountPaid = roundMoney(submittedAmountPaid);
 
     const initialPaymentStatus =
-      normalizedOrderType === 'route' ||
-      (normalizedOrderType === 'normal' &&
-        initialAmountPaid >= finalTotalAmount &&
-        finalTotalAmount > 0)
+      initialAmountPaid >= finalTotalAmount && finalTotalAmount > 0
         ? 'completed'
         : 'pending';
 
