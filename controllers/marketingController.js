@@ -515,19 +515,19 @@ const trackCampaignEvent = async (req, res) => {
       `
       INSERT INTO marketing_campaign_events
         (campaign_id, event_type, session_id, source_path, request_id, metadata, created_at)
-      SELECT mc.id, $2, $3, $4, $5, $6::jsonb, NOW()
+      SELECT mc.id, $2::varchar(30), $3::varchar(120), $4::text, $5::varchar(120), $6::jsonb, NOW()
       FROM marketing_campaigns mc
       WHERE mc.id = $1
         AND mc.status = 'active'
         AND (mc.starts_at IS NULL OR mc.starts_at <= NOW())
         AND (mc.ends_at IS NULL OR mc.ends_at > NOW())
         AND (
-          $3::text IS NULL
+          $3::varchar(120) IS NULL
           OR NOT EXISTS (
             SELECT 1 FROM marketing_campaign_events existing
             WHERE existing.campaign_id = mc.id
-              AND existing.event_type = $2
-              AND existing.session_id = $3
+              AND existing.event_type = $2::varchar(30)
+              AND existing.session_id = $3::varchar(120)
               AND existing.created_at >= NOW() - INTERVAL '6 hours'
           )
         )
