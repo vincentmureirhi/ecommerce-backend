@@ -2,12 +2,15 @@
 
 const express = require('express');
 const controller = require('../controllers/marketingController');
+const collections = require('../controllers/collectionController');
 const { verifyToken, requireAdmin } = require('../middleware/authMiddleware');
 
 const router = express.Router();
 
 // Public marketing surface for storefront campaigns and coupon previews.
 router.get('/campaigns/public', controller.listPublicCampaigns);
+router.get('/collections/public', collections.listPublicCollections);
+router.get('/collections/public/:slug', collections.getPublicCollection);
 router.post('/coupons/validate', controller.validateCoupon);
 router.post('/campaigns/:id/events', controller.trackCampaignEvent);
 

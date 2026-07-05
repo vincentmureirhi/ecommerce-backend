@@ -29,6 +29,16 @@ function normalizeSlug(value, fallback = 'CAMPAIGN') {
 }
 
 function normalizeDate(value) {
+function normalizeCollectionSlug(value) {
+  const source = normalizeText(value);
+  if (!source) return null;
+  return source
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 120) || null;
+}
+
   if (!value) return null;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
@@ -208,12 +218,14 @@ const createCampaign = async (req, res) => {
          starts_at, ends_at, priority, hero_title, hero_subtitle, badge_label,
          cta_label, cta_url, budget_amount, target_amount, metadata,
          placement, hero_image_url, accent_color, auto_activate, auto_expire,
-         sms_enabled, sms_message, sms_audience, created_by, updated_by,
+         sms_enabled, sms_message, sms_audience, is_collection, collection_slug,
+         automatic_rules, seo_title, seo_description, homepage_section, product_limit, share_image_url, published_at, created_by, updated_by,
          created_at, updated_at)
       VALUES
         ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
          $13, $14, $15, $16, $17::jsonb, $18, $19, $20, $21, $22,
-         $23, $24, $25, $26, $26, NOW(), NOW())
+         $23, $24, $25, $26, $27, $28::jsonb, $29, $30, $31, $32, $33, $34,
+         $35, $35, NOW(), NOW())
       RETURNING *
       `,
       [
@@ -242,6 +254,15 @@ const createCampaign = async (req, res) => {
         normalizeBoolean(body.sms_enabled, false),
         normalizeText(body.sms_message),
         normalizeStatus(body.sms_audience, 'campaign_scope'),
+        normalizeBoolean(body.is_collection, false),
+        normalizeCollectionSlug(body.collection_slug),
+        JSON.stringify(body.automatic_rules && typeof body.automatic_rules === 'object' ? body.automatic_rules : {}),
+        normalizeText(body.seo_title),
+        normalizeText(body.seo_description),
+        normalizeText(body.homepage_section),
+        Math.min(Math.max(Number(body.product_limit) || 12, 4), 24),
+        normalizeText(body.share_image_url),
+        normalizeDate(body.published_at),
         req.user?.id || null,
       ]
     );
@@ -290,6 +311,15 @@ const updateCampaign = async (req, res) => {
       sms_audience: (v) => normalizeStatus(v, 'campaign_scope'),
       sms_queued_at: (v) => normalizeDate(v),
       metadata: (v) => JSON.stringify(v && typeof v === 'object' ? v : {}),
+      is_collection: (v) => normalizeBoolean(v, false),
+      collection_slug: (v) => normalizeCollectionSlug(v),
+      automatic_rules: (v) => JSON.stringify(v && typeof v === 'object' ? v : {}),
+      seo_title: (v) => normalizeText(v),
+      seo_description: (v) => normalizeText(v),
+      homepage_section: (v) => normalizeText(v),
+      product_limit: (v) => Math.min(Math.max(Number(v) || 12, 4), 24),
+      share_image_url: (v) => normalizeText(v),
+      published_at: (v) => normalizeDate(v),
     };
 
     const fields = [];
@@ -297,7 +327,7 @@ const updateCampaign = async (req, res) => {
     for (const [key, normalizer] of Object.entries(allowed)) {
       if (!(key in req.body)) continue;
       params.push(normalizer(req.body[key]));
-      fields.push(`${key} = $${params.length}${key === 'metadata' ? '::jsonb' : ''}`);
+      fields.push(`${key} = $${params.length}${key === 'metadata' || key === 'automatic_rules' ? '::jsonb' : ''}`);
     }
 
     if (!fields.length) return handleError(res, 400, 'No valid campaign fields were provided');

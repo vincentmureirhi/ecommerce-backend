@@ -1465,6 +1465,7 @@ const guestCheckout = async (req, res) => {
       items,
       coupon_code,
       promo_code,
+      marketing_campaign_id,
     } = req.body;
 
     const authenticatedSalesRep = await resolveAuthenticatedSalesRep(req, client);
@@ -1685,6 +1686,24 @@ const guestCheckout = async (req, res) => {
     const discountAmount = couponApplication ? couponApplication.discount_amount : 0;
     const finalTotalAmount = couponApplication ? couponApplication.final_total_amount : subtotalAmount;
 
+    const requestedCampaignId = Number(marketing_campaign_id);
+    let attributedCampaignId = couponApplication?.campaign_id || null;
+    if (!attributedCampaignId && Number.isInteger(requestedCampaignId) && requestedCampaignId > 0) {
+      const campaignResult = await client.query(
+        `
+        SELECT id
+        FROM marketing_campaigns
+        WHERE id = $1
+          AND status = 'active'
+          AND (starts_at IS NULL OR starts_at <= NOW())
+          AND (ends_at IS NULL OR ends_at > NOW())
+        LIMIT 1
+        `,
+        [requestedCampaignId]
+      );
+      attributedCampaignId = campaignResult.rows[0]?.id || null;
+    }
+
     const orderNum = generateOrderNumber();
     const routeCreditResult =
       normalizedOrderType === 'route'
@@ -1754,7 +1773,7 @@ const guestCheckout = async (req, res) => {
         discountAmount,
         couponApplication?.coupon_id || null,
         couponApplication?.coupon_code || null,
-        couponApplication?.campaign_id || null,
+        attributedCampaignId,
         JSON.stringify(couponApplication || {}),
         initialAmountPaid,
         initialLastPaymentDate,
@@ -1765,6 +1784,22 @@ const guestCheckout = async (req, res) => {
     );
 
     const orderId = orderResult.rows[0].id;
+    if (attributedCampaignId) {
+      await client.query(
+        `
+        INSERT INTO marketing_campaign_events
+          (campaign_id, event_type, order_id, customer_id, source_path, request_id, metadata, created_at)
+        VALUES ($1, 'conversion', $2, $3, '/checkout', $4, $5::jsonb, NOW())
+        `,
+        [
+          attributedCampaignId,
+          orderId,
+          customerId || null,
+          req.requestId || null,
+          JSON.stringify({ order_number: orderNum, total_amount: finalTotalAmount }),
+        ]
+      );
+    }
     if (couponApplication) {
       await recordCouponRedemption(client, couponApplication, {
         orderId,
@@ -1925,7 +1960,7 @@ const createOrder = async (req, res) => {
       items,
       coupon_code,
       promo_code,
-      
+
       amount_paid,
       due_date,
     } = req.body;
