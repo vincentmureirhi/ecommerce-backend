@@ -23,6 +23,28 @@ const apiRateLimiter = rateLimit({
   },
 });
 
+const paymentStkRateLimiter = rateLimit({
+  windowMs: envInt('PAYMENT_STK_RATE_LIMIT_WINDOW_MS', 5 * 60 * 1000, { min: 1000 }),
+  max: envInt('PAYMENT_STK_RATE_LIMIT_MAX', 5, { min: 1 }),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many M-Pesa payment attempts. Please wait a few minutes before trying again.',
+  },
+});
+
+const paymentStatusRateLimiter = rateLimit({
+  windowMs: envInt('PAYMENT_STATUS_RATE_LIMIT_WINDOW_MS', 60 * 1000, { min: 1000 }),
+  max: envInt('PAYMENT_STATUS_RATE_LIMIT_MAX', 60, { min: 1 }),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many payment status requests. Please retry shortly.',
+  },
+});
+
 const routeCustomerUpsertRateLimiter = rateLimit({
   windowMs: envInt('ROUTE_CUSTOMER_UPSERT_RATE_LIMIT_WINDOW_MS', 60 * 1000, { min: 1000 }),
   max: envInt('ROUTE_CUSTOMER_UPSERT_RATE_LIMIT_MAX', 30, { min: 1 }),
@@ -113,6 +135,8 @@ const vendorMessageRateLimiter = rateLimit({
 
 module.exports = {
   apiRateLimiter,
+  paymentStkRateLimiter,
+  paymentStatusRateLimiter,
   routeCustomerUpsertRateLimiter,
   salesRepLoginRateLimiter,
   salesRepRateLimiter,
