@@ -6,6 +6,7 @@ const { handleError, handleSuccess } = require('../utils/errorHandler');
 const Decimal = require('decimal.js');
 const moment = require('moment');
 const { enqueuePaymentConfirmedSms } = require('../services/smsService');
+const mpesaConfig = require('../config/mpesa');
 
 function normalizePhone(phone) {
   let value = String(phone || '').replace(/\D/g, '');
@@ -21,17 +22,16 @@ function money(value) {
 }
 
 function mpesaBaseUrl() {
-  const env = String(process.env.MPESA_ENVIRONMENT || 'sandbox').trim().toLowerCase();
-  return env === 'production' || env === 'live' ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke';
+  return mpesaConfig.baseUrl();
 }
 
 function transactionType() {
-  return process.env.MPESA_TRANSACTION_TYPE || 'CustomerBuyGoodsOnline';
+  return mpesaConfig.transactionType();
 }
 
 async function getAccessToken() {
-  const key = process.env.MPESA_CONSUMER_KEY;
-  const secret = process.env.MPESA_CONSUMER_SECRET;
+  const key = mpesaConfig.consumerKey();
+  const secret = mpesaConfig.consumerSecret();
   if (!key || !secret) throw new Error('M-Pesa consumer credentials are not configured');
 
   const auth = Buffer.from(`${key}:${secret}`).toString('base64');
@@ -162,9 +162,9 @@ async function initiateSTKPush(req, res) {
     try {
       const token = await getAccessToken();
       const timestamp = moment().format('YYYYMMDDHHmmss');
-      const shortcode = process.env.MPESA_BUSINESS_SHORTCODE;
-      const passkey = process.env.MPESA_PASSKEY;
-      const callback = process.env.MPESA_CALLBACK_URL;
+      const shortcode = mpesaConfig.businessShortcode();
+      const passkey = mpesaConfig.passkey();
+      const callback = mpesaConfig.callbackUrl();
       if (!shortcode || !passkey || !callback) throw new Error('M-Pesa shortcode, passkey, or callback URL is not configured');
 
       const password = Buffer.from(`${shortcode}${passkey}${timestamp}`).toString('base64');
