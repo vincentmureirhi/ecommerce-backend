@@ -138,6 +138,31 @@ async function initiateSTKPush(req, res) {
       return handleError(res, 404, 'Order not found');
     }
 
+    // The order row is locked by findOrder(). Perform the active-payment check
+    // inside the same transaction so two simultaneous requests cannot both pass
+    // the check and create competing STK prompts for this order.
+    const activePayment = await client.query(
+      `
+        SELECT id, status, checkout_request_id, created_at
+        FROM payments
+        WHERE order_id = $1
+          AND status IN ('initiated', 'pending')
+          AND created_at > CURRENT_TIMESTAMP - INTERVAL '5 minutes'
+        ORDER BY id DESC
+        LIMIT 1
+      `,
+      [order.id]
+    );
+    if (activePayment.rows.length) {
+      await client.query('ROLLBACK');
+      return handleError(res, 409, 'An M-Pesa payment prompt is already active for this order. Complete it or wait for it to expire before trying again.', {
+        payment_id: activePayment.rows[0].id,
+        status: activePayment.rows[0].status,
+        checkout_request_id: activePayment.rows[0].checkout_request_id,
+        created_at: activePayment.rows[0].created_at,
+      });
+    }
+
     const balance = Decimal.max(new Decimal(order.total_amount || 0).minus(order.amount_paid || 0), 0);
     if (balance.lte(0)) {
       await client.query('ROLLBACK');
@@ -254,8 +279,6 @@ async function mpesaCallback(req, res) {
 
     const payment = paymentRes.rows[0];
 
-    // Safaricom callbacks can be retried. Once this payment reached a terminal
-    // state, do not re-settle the order or queue another SMS.
     if (['completed', 'manually_resolved', 'failed', 'cancelled', 'timeout'].includes(String(payment.status).toLowerCase())) {
       await client.query('COMMIT');
       return handleSuccess(res, 200, 'Payment callback already processed', {
@@ -287,9 +310,6 @@ async function mpesaCallback(req, res) {
          JSON.stringify(result), amountMatched ? 'matched' : 'mismatch', payment.id]
       );
 
-      // A successful Safaricom transaction with an unexpected amount is real
-      // money, but it is NOT an automatically matched order payment. Keep it
-      // visible for admin reconciliation without crediting the order.
       if (!amountMatched) {
         await client.query('COMMIT');
 
