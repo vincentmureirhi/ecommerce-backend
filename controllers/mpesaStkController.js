@@ -5,6 +5,7 @@ const pool = require('../config/database');
 const { handleError, handleSuccess } = require('../utils/errorHandler');
 const Decimal = require('decimal.js');
 const moment = require('moment');
+const { enqueuePaymentConfirmedSms } = require('../services/smsService');
 
 function normalizePhone(phone) {
   let value = String(phone || '').replace(/\D/g, '');
@@ -21,9 +22,7 @@ function money(value) {
 
 function mpesaBaseUrl() {
   const env = String(process.env.MPESA_ENVIRONMENT || 'sandbox').trim().toLowerCase();
-  return env === 'production' || env === 'live'
-    ? 'https://api.safaricom.co.ke'
-    : 'https://sandbox.safaricom.co.ke';
+  return env === 'production' || env === 'live' ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke';
 }
 
 function transactionType() {
@@ -36,17 +35,16 @@ async function getAccessToken() {
   if (!key || !secret) throw new Error('M-Pesa consumer credentials are not configured');
 
   const auth = Buffer.from(`${key}:${secret}`).toString('base64');
-  const response = await axios.get(
-    `${mpesaBaseUrl()}/oauth/v1/generate?grant_type=client_credentials`,
-    { headers: { Authorization: `Basic ${auth}` }, timeout: 10000 }
-  );
+  const response = await axios.get(`${mpesaBaseUrl()}/oauth/v1/generate?grant_type=client_credentials`, {
+    headers: { Authorization: `Basic ${auth}` },
+    timeout: 10000,
+  });
   return response.data.access_token;
 }
 
 async function findOrder(client, reference) {
   const value = String(reference || '').trim();
   if (!value) return null;
-
   const result = await client.query(
     `
       SELECT id, order_number, order_type, total_amount, amount_paid, customer_phone,
@@ -112,7 +110,12 @@ async function syncOrderPayment(client, orderId) {
     );
   }
 
-  return { ...row, amount_paid: paid.toFixed(2), payment_status: fullyPaid ? 'completed' : 'pending' };
+  return {
+    ...row,
+    amount_paid: paid.toFixed(2),
+    payment_status: fullyPaid ? 'completed' : 'pending',
+    sms_should_notify_payment_confirmed: fullyPaid,
+  };
 }
 
 async function initiateSTKPush(req, res) {
@@ -261,8 +264,35 @@ async function mpesaCallback(req, res) {
          JSON.stringify(result), receivedAmount.eq(expectedAmount) ? 'matched' : 'mismatch', payment.id]
       );
 
-      if (payment.order_id) await syncOrderPayment(client, payment.order_id);
+      let settledOrder = null;
+      if (payment.order_id) settledOrder = await syncOrderPayment(client, payment.order_id);
+
+      if (settledOrder?.sms_should_notify_payment_confirmed) {
+        try {
+          await enqueuePaymentConfirmedSms(client, settledOrder, { paymentId: payment.id });
+        } catch (smsError) {
+          console.error('Failed to queue payment confirmation SMS:', smsError.message);
+        }
+      }
+
       await client.query('COMMIT');
+
+      try {
+        const { broadcastPaymentCompleted } = require('../websocket');
+        broadcastPaymentCompleted({
+          id: payment.id,
+          order_id: payment.order_id,
+          order_number: settledOrder?.order_number,
+          amount: receivedAmount.toFixed(2),
+          status: 'completed',
+          mpesa_receipt: receipt,
+          customer_phone: phone,
+          completed_at: new Date(),
+        });
+      } catch (broadcastError) {
+        console.error('Payment websocket broadcast failed:', broadcastError.message);
+      }
+
       return handleSuccess(res, 200, 'Payment successful', { checkoutRequestId, resultCode, resultDesc, mpesa_receipt: receipt });
     }
 
@@ -273,6 +303,14 @@ async function mpesaCallback(req, res) {
       [failedStatus, String(resultCode), resultDesc, JSON.stringify(result), payment.id]
     );
     await client.query('COMMIT');
+
+    try {
+      const { broadcastPaymentFailed } = require('../websocket');
+      broadcastPaymentFailed({ id: payment.id, order_id: payment.order_id, amount: payment.amount, status: failedStatus, result_code: resultCode, result_desc: resultDesc, customer_phone: payment.customer_phone, failure_reason: resultDesc });
+    } catch (broadcastError) {
+      console.error('Payment websocket broadcast failed:', broadcastError.message);
+    }
+
     return handleSuccess(res, 200, 'Payment callback processed', { checkoutRequestId, status: failedStatus, resultDesc });
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch (_) {}
