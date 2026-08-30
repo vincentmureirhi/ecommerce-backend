@@ -163,6 +163,7 @@ async function initiateSTKPush(req, res) {
       const token = await getAccessToken();
       const timestamp = moment().format('YYYYMMDDHHmmss');
       const shortcode = mpesaConfig.businessShortcode();
+      const tillNumber = mpesaConfig.realTillNumber() || shortcode;
       const passkey = mpesaConfig.passkey();
       const callback = mpesaConfig.callbackUrl();
       if (!shortcode || !passkey || !callback) throw new Error('M-Pesa shortcode, passkey, or callback URL is not configured');
@@ -175,11 +176,11 @@ async function initiateSTKPush(req, res) {
         TransactionType: transactionType(),
         Amount: Math.round(Number(amountValue.toFixed(2))),
         PartyA: phoneNumber,
-        PartyB: shortcode,
+        PartyB: tillNumber,
         PhoneNumber: phoneNumber,
         CallBackURL: callback,
-        AccountReference: `ORD-${order.order_number || order.id}`.slice(0, 20),
-        TransactionDesc: `XPOSE order ${order.order_number || order.id}`.slice(0, 50),
+        AccountReference: `ORD-${order.order_number || order.id}`.slice(0, 12),
+        TransactionDesc: `XPOSE ${order.order_number || order.id}`.slice(0, 13),
       };
 
       const response = await axios.post(
