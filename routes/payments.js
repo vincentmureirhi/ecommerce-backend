@@ -6,7 +6,6 @@ const {
   paymentStkRateLimiter,
   paymentStatusRateLimiter,
 } = require('../middleware/rateLimitMiddleware');
-const { preventDuplicateActiveStk } = require('../middleware/paymentGuards');
 const legacyPaymentController = require('../controllers/paymentController');
 const mpesaStkController = require('../controllers/mpesaStkController');
 
@@ -14,10 +13,11 @@ const router = express.Router();
 
 // Public / storefront-facing M-Pesa endpoints.
 // STK/callback are intentionally handled by the dedicated configurable controller.
+// Duplicate active-payment protection is performed inside the same DB transaction
+// that locks the order row, preventing race conditions between concurrent requests.
 router.post(
   '/stk-push',
   paymentStkRateLimiter,
-  preventDuplicateActiveStk,
   mpesaStkController.initiateSTKPush
 );
 router.post('/callback', mpesaStkController.mpesaCallback);
