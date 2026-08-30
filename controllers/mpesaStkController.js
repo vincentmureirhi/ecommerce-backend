@@ -67,8 +67,12 @@ async function syncOrderPayment(client, orderId) {
       SELECT
         o.id, o.order_number, o.order_type, o.total_amount, o.order_status,
         o.payment_status, o.payment_state,
-        COALESCE(SUM(CASE WHEN p.status IN ('completed','manually_resolved')
-          THEN COALESCE(p.received_amount, p.amount) ELSE 0 END), 0)::numeric(12,2) AS paid_total
+        COALESCE(SUM(CASE
+          WHEN p.status IN ('completed','manually_resolved')
+           AND (p.status = 'manually_resolved' OR COALESCE(p.reconciliation_status, 'matched') <> 'mismatch')
+          THEN COALESCE(p.received_amount, p.amount)
+          ELSE 0
+        END), 0)::numeric(12,2) AS paid_total
       FROM orders o
       LEFT JOIN payments p ON p.order_id = o.id
       WHERE o.id = $1
@@ -233,7 +237,11 @@ async function mpesaCallback(req, res) {
     const result = req.body?.Body?.stkCallback;
     if (!result) return handleSuccess(res, 200, 'Callback ignored', { ignored: true });
 
-    const checkoutRequestId = result.CheckoutRequestID;
+    const checkoutRequestId = String(result.CheckoutRequestID || '').trim();
+    if (!checkoutRequestId) {
+      return handleSuccess(res, 200, 'Callback ignored', { ignored: true, reason: 'missing_checkout_request_id' });
+    }
+
     await client.query('BEGIN');
     const paymentRes = await client.query(
       `SELECT * FROM payments WHERE checkout_request_id=$1 ORDER BY id DESC LIMIT 1 FOR UPDATE`,
@@ -245,6 +253,19 @@ async function mpesaCallback(req, res) {
     }
 
     const payment = paymentRes.rows[0];
+
+    // Safaricom callbacks can be retried. Once this payment reached a terminal
+    // state, do not re-settle the order or queue another SMS.
+    if (['completed', 'manually_resolved', 'failed', 'cancelled', 'timeout'].includes(String(payment.status).toLowerCase())) {
+      await client.query('COMMIT');
+      return handleSuccess(res, 200, 'Payment callback already processed', {
+        checkoutRequestId,
+        status: payment.status,
+        payment_id: payment.id,
+        duplicate: true,
+      });
+    }
+
     const resultCode = Number(result.ResultCode);
     const resultDesc = String(result.ResultDesc || '');
 
@@ -255,6 +276,7 @@ async function mpesaCallback(req, res) {
       const expectedAmount = new Decimal(payment.expected_amount ?? payment.amount ?? 0);
       const receipt = value('MpesaReceiptNumber') || null;
       const phone = value('PhoneNumber') ? String(value('PhoneNumber')) : payment.customer_phone;
+      const amountMatched = receivedAmount.eq(expectedAmount);
 
       await client.query(
         `UPDATE payments SET status='completed', received_amount=$1, customer_phone=$2,
@@ -262,11 +284,45 @@ async function mpesaCallback(req, res) {
          reconciliation_status=$7, failure_reason=NULL, completed_at=CURRENT_TIMESTAMP,
          updated_at=CURRENT_TIMESTAMP WHERE id=$8`,
         [receivedAmount.toFixed(2), phone, receipt, String(resultCode), resultDesc,
-         JSON.stringify(result), receivedAmount.eq(expectedAmount) ? 'matched' : 'mismatch', payment.id]
+         JSON.stringify(result), amountMatched ? 'matched' : 'mismatch', payment.id]
       );
 
-      let settledOrder = null;
-      if (payment.order_id) settledOrder = await syncOrderPayment(client, payment.order_id);
+      // A successful Safaricom transaction with an unexpected amount is real
+      // money, but it is NOT an automatically matched order payment. Keep it
+      // visible for admin reconciliation without crediting the order.
+      if (!amountMatched) {
+        await client.query('COMMIT');
+
+        try {
+          const { broadcastPaymentStatusChange } = require('../websocket');
+          broadcastPaymentStatusChange({
+            id: payment.id,
+            order_id: payment.order_id,
+            amount: receivedAmount.toFixed(2),
+            expected_amount: expectedAmount.toFixed(2),
+            status: 'completed',
+            reconciliation_status: 'mismatch',
+            mpesa_receipt: receipt,
+            customer_phone: phone,
+            result_code: resultCode,
+            result_desc: resultDesc,
+            updated_at: new Date(),
+          });
+        } catch (broadcastError) {
+          console.error('Payment websocket broadcast failed:', broadcastError.message);
+        }
+
+        return handleSuccess(res, 200, 'Payment received but amount requires reconciliation', {
+          checkoutRequestId,
+          resultCode,
+          resultDesc,
+          mpesa_receipt: receipt,
+          payment_id: payment.id,
+          reconciliation_status: 'mismatch',
+        });
+      }
+
+      const settledOrder = payment.order_id ? await syncOrderPayment(client, payment.order_id) : null;
 
       if (settledOrder?.sms_should_notify_payment_confirmed) {
         try {
@@ -286,6 +342,7 @@ async function mpesaCallback(req, res) {
           order_number: settledOrder?.order_number,
           amount: receivedAmount.toFixed(2),
           status: 'completed',
+          reconciliation_status: 'matched',
           mpesa_receipt: receipt,
           customer_phone: phone,
           completed_at: new Date(),
@@ -324,8 +381,16 @@ async function mpesaCallback(req, res) {
 async function queryPaymentStatus(req, res) {
   try {
     const checkoutRequestId = String(req.params.checkoutRequestId || '').trim();
+    if (!checkoutRequestId || checkoutRequestId.length > 100) {
+      return handleError(res, 400, 'Invalid checkout request ID');
+    }
+
     const result = await pool.query(
-      `SELECT p.*, o.order_number, o.total_amount, o.amount_paid AS order_amount_paid,
+      `SELECT p.id, p.order_id, p.status, p.amount, p.expected_amount, p.received_amount,
+              p.method, p.source, p.customer_phone, p.mpesa_receipt, p.result_code,
+              p.result_desc, p.reconciliation_status, p.failure_reason,
+              p.checkout_request_id, p.created_at, p.updated_at, p.completed_at,
+              o.order_number, o.total_amount, o.amount_paid AS order_amount_paid,
               o.payment_status AS order_payment_status, o.payment_state AS order_payment_state,
               GREATEST(COALESCE(o.total_amount,0)-COALESCE(o.amount_paid,0),0)::numeric(12,2) AS order_balance_due
        FROM payments p LEFT JOIN orders o ON o.id=p.order_id
@@ -333,6 +398,7 @@ async function queryPaymentStatus(req, res) {
       [checkoutRequestId]
     );
     if (!result.rows.length) return handleError(res, 404, 'Payment not found');
+
     return handleSuccess(res, 200, 'Payment status retrieved', result.rows[0]);
   } catch (error) {
     return handleError(res, 500, 'Failed to query payment status', error);
