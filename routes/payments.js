@@ -8,20 +8,24 @@ const {
 } = require('../middleware/rateLimitMiddleware');
 const legacyPaymentController = require('../controllers/paymentController');
 const mpesaStkController = require('../controllers/mpesaStkController');
+const mpesaConfirmationController = require('../controllers/mpesaConfirmationController');
 
 const router = express.Router();
 
 // Public / storefront-facing M-Pesa endpoints.
-// STK/callback are intentionally handled by the dedicated configurable controller.
-// Duplicate active-payment protection is performed inside the same DB transaction
-// that locks the order row, preventing race conditions between concurrent requests.
+// STK initiation stays on the configurable controller; confirmation and
+// recovery use the hardened confirmation controller with explicit SQL types.
 router.post(
   '/stk-push',
   paymentStkRateLimiter,
   mpesaStkController.initiateSTKPush
 );
-router.post('/callback', mpesaStkController.mpesaCallback);
-router.get('/status/:checkoutRequestId', paymentStatusRateLimiter, mpesaStkController.queryPaymentStatus);
+router.post('/callback', mpesaConfirmationController.mpesaCallback);
+router.get(
+  '/status/:checkoutRequestId',
+  paymentStatusRateLimiter,
+  mpesaConfirmationController.queryPaymentStatus
+);
 
 // Admin routes keep the existing reconciliation/reporting implementation.
 router.get('/summary', verifyToken, requireAdmin, legacyPaymentController.getPaymentSummary);
