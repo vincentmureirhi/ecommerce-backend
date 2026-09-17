@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 const express = require('express');
 const { verifyToken, requireAdmin } = require('../middleware/authMiddleware');
@@ -8,13 +8,13 @@ const {
 } = require('../middleware/rateLimitMiddleware');
 const legacyPaymentController = require('../controllers/paymentController');
 const mpesaStkController = require('../controllers/mpesaStkController');
-const mpesaConfirmationController = require('../controllers/mpesaConfirmationControllerV2');
+const mpesaConfirmationController = require('../controllers/mpesaConfirmationControllerV3');
 
 const router = express.Router();
 
 // Public / storefront-facing M-Pesa endpoints.
 // STK initiation stays on the existing controller; confirmation and recovery
-// use a dedicated type-safe settlement controller.
+// use the callback-authoritative confirmation controller.
 router.post('/stk-push', paymentStkRateLimiter, mpesaStkController.initiateSTKPush);
 router.post('/callback', mpesaConfirmationController.mpesaCallback);
 router.get('/status/:checkoutRequestId', paymentStatusRateLimiter, mpesaConfirmationController.queryPaymentStatus);
