@@ -138,9 +138,6 @@ async function initiateSTKPush(req, res) {
       return handleError(res, 404, 'Order not found');
     }
 
-    // The order row is locked by findOrder(). Perform the active-payment check
-    // inside the same transaction so two simultaneous requests cannot both pass
-    // the check and create competing STK prompts for this order.
     const activePayment = await client.query(
       `
         SELECT id, status, checkout_request_id, created_at
@@ -312,65 +309,24 @@ async function mpesaCallback(req, res) {
 
       if (!amountMatched) {
         await client.query('COMMIT');
-
         try {
           const { broadcastPaymentStatusChange } = require('../websocket');
-          broadcastPaymentStatusChange({
-            id: payment.id,
-            order_id: payment.order_id,
-            amount: receivedAmount.toFixed(2),
-            expected_amount: expectedAmount.toFixed(2),
-            status: 'completed',
-            reconciliation_status: 'mismatch',
-            mpesa_receipt: receipt,
-            customer_phone: phone,
-            result_code: resultCode,
-            result_desc: resultDesc,
-            updated_at: new Date(),
-          });
-        } catch (broadcastError) {
-          console.error('Payment websocket broadcast failed:', broadcastError.message);
-        }
-
-        return handleSuccess(res, 200, 'Payment received but amount requires reconciliation', {
-          checkoutRequestId,
-          resultCode,
-          resultDesc,
-          mpesa_receipt: receipt,
-          payment_id: payment.id,
-          reconciliation_status: 'mismatch',
-        });
+          broadcastPaymentStatusChange({ id: payment.id, order_id: payment.order_id, amount: receivedAmount.toFixed(2), expected_amount: expectedAmount.toFixed(2), status: 'completed', reconciliation_status: 'mismatch', mpesa_receipt: receipt, customer_phone: phone, result_code: resultCode, result_desc: resultDesc, updated_at: new Date() });
+        } catch (broadcastError) { console.error('Payment websocket broadcast failed:', broadcastError.message); }
+        return handleSuccess(res, 200, 'Payment received but amount requires reconciliation', { checkoutRequestId, resultCode, resultDesc, mpesa_receipt: receipt, payment_id: payment.id, reconciliation_status: 'mismatch' });
       }
 
       const settledOrder = payment.order_id ? await syncOrderPayment(client, payment.order_id) : null;
-
       if (settledOrder?.sms_should_notify_payment_confirmed) {
-        try {
-          await enqueuePaymentConfirmedSms(client, settledOrder, { paymentId: payment.id });
-        } catch (smsError) {
-          console.error('Failed to queue payment confirmation SMS:', smsError.message);
-        }
+        try { await enqueuePaymentConfirmedSms(client, settledOrder, { paymentId: payment.id }); }
+        catch (smsError) { console.error('Failed to queue payment confirmation SMS:', smsError.message); }
       }
-
       await client.query('COMMIT');
 
       try {
         const { broadcastPaymentCompleted } = require('../websocket');
-        broadcastPaymentCompleted({
-          id: payment.id,
-          order_id: payment.order_id,
-          order_number: settledOrder?.order_number,
-          amount: receivedAmount.toFixed(2),
-          status: 'completed',
-          reconciliation_status: 'matched',
-          mpesa_receipt: receipt,
-          customer_phone: phone,
-          completed_at: new Date(),
-        });
-      } catch (broadcastError) {
-        console.error('Payment websocket broadcast failed:', broadcastError.message);
-      }
-
+        broadcastPaymentCompleted({ id: payment.id, order_id: payment.order_id, order_number: settledOrder?.order_number, amount: receivedAmount.toFixed(2), status: 'completed', reconciliation_status: 'matched', mpesa_receipt: receipt, customer_phone: phone, completed_at: new Date() });
+      } catch (broadcastError) { console.error('Payment websocket broadcast failed:', broadcastError.message); }
       return handleSuccess(res, 200, 'Payment successful', { checkoutRequestId, resultCode, resultDesc, mpesa_receipt: receipt });
     }
 
@@ -385,14 +341,105 @@ async function mpesaCallback(req, res) {
     try {
       const { broadcastPaymentFailed } = require('../websocket');
       broadcastPaymentFailed({ id: payment.id, order_id: payment.order_id, amount: payment.amount, status: failedStatus, result_code: resultCode, result_desc: resultDesc, customer_phone: payment.customer_phone, failure_reason: resultDesc });
-    } catch (broadcastError) {
-      console.error('Payment websocket broadcast failed:', broadcastError.message);
-    }
-
+    } catch (broadcastError) { console.error('Payment websocket broadcast failed:', broadcastError.message); }
     return handleSuccess(res, 200, 'Payment callback processed', { checkoutRequestId, status: failedStatus, resultDesc });
   } catch (error) {
     try { await client.query('ROLLBACK'); } catch (_) {}
     return handleError(res, 500, 'Failed to process M-Pesa callback', error);
+  } finally {
+    client.release();
+  }
+}
+
+// Daraja STK Query is a recovery path when the asynchronous callback is delayed
+// or cannot reach the application. The callback remains the primary confirmation
+// path; this is deliberately only used while the DB payment is still pending.
+async function queryDarajaStkStatus(checkoutRequestId) {
+  const shortcode = mpesaConfig.businessShortcode();
+  const passkey = mpesaConfig.passkey();
+  if (!shortcode || !passkey) throw new Error('M-Pesa shortcode or passkey is not configured');
+
+  const token = await getAccessToken();
+  const timestamp = moment().format('YYYYMMDDHHmmss');
+  const password = Buffer.from(`${shortcode}${passkey}${timestamp}`).toString('base64');
+
+  const response = await axios.post(
+    `${mpesaBaseUrl()}/mpesa/stkpushquery/v1/query`,
+    {
+      BusinessShortCode: shortcode,
+      Password: password,
+      Timestamp: timestamp,
+      CheckoutRequestID: checkoutRequestId,
+    },
+    { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+  );
+
+  return response.data || {};
+}
+
+async function reconcileFromDarajaQuery(checkoutRequestId, darajaResult) {
+  const resultCode = Number(darajaResult.ResultCode);
+  const resultDesc = String(darajaResult.ResultDesc || '');
+  const terminalSuccess = resultCode === 0;
+  const terminalFailure = !terminalSuccess && /cancel|timeout|failed|declin|unable/i.test(resultDesc);
+  if (!terminalSuccess && !terminalFailure) return null;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const paymentRes = await client.query(
+      `SELECT * FROM payments WHERE checkout_request_id=$1 ORDER BY id DESC LIMIT 1 FOR UPDATE`,
+      [checkoutRequestId]
+    );
+    if (!paymentRes.rows.length) {
+      await client.query('COMMIT');
+      return null;
+    }
+
+    const payment = paymentRes.rows[0];
+    if (['completed', 'manually_resolved', 'failed', 'cancelled', 'timeout'].includes(String(payment.status).toLowerCase())) {
+      await client.query('COMMIT');
+      return payment;
+    }
+
+    if (terminalSuccess) {
+      // STK Query confirms the request completed, but normally does not expose
+      // the callback receipt metadata. Use the expected payment amount and leave
+      // receipt blank until/if the callback arrives later.
+      await client.query(
+        `UPDATE payments
+         SET status='completed', received_amount=$1, result_code=$2, result_desc=$3,
+             reconciliation_status='matched', failure_reason=NULL,
+             completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP
+         WHERE id=$4`,
+        [String(payment.expected_amount ?? payment.amount), String(resultCode), resultDesc, payment.id]
+      );
+
+      const settledOrder = payment.order_id ? await syncOrderPayment(client, payment.order_id) : null;
+      if (settledOrder?.sms_should_notify_payment_confirmed) {
+        try { await enqueuePaymentConfirmedSms(client, settledOrder, { paymentId: payment.id }); }
+        catch (smsError) { console.error('Failed to queue payment confirmation SMS:', smsError.message); }
+      }
+      await client.query('COMMIT');
+
+      try {
+        const { broadcastPaymentCompleted } = require('../websocket');
+        broadcastPaymentCompleted({ id: payment.id, order_id: payment.order_id, order_number: settledOrder?.order_number, amount: String(payment.expected_amount ?? payment.amount), status: 'completed', reconciliation_status: 'matched', mpesa_receipt: null, customer_phone: payment.customer_phone, completed_at: new Date() });
+      } catch (broadcastError) { console.error('Payment websocket broadcast failed:', broadcastError.message); }
+      return { ...payment, status: 'completed', received_amount: String(payment.expected_amount ?? payment.amount), result_code: String(resultCode), result_desc: resultDesc };
+    }
+
+    const failedStatus = /cancel/i.test(resultDesc) ? 'cancelled' : /timeout/i.test(resultDesc) ? 'timeout' : 'failed';
+    await client.query(
+      `UPDATE payments SET status=$1, result_code=$2, result_desc=$3,
+       reconciliation_status='manual_review', failure_reason=$3, updated_at=CURRENT_TIMESTAMP WHERE id=$4`,
+      [failedStatus, String(resultCode), resultDesc, payment.id]
+    );
+    await client.query('COMMIT');
+    return { ...payment, status: failedStatus, result_code: String(resultCode), result_desc: resultDesc };
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw error;
   } finally {
     client.release();
   }
@@ -405,7 +452,7 @@ async function queryPaymentStatus(req, res) {
       return handleError(res, 400, 'Invalid checkout request ID');
     }
 
-    const result = await pool.query(
+    let result = await pool.query(
       `SELECT p.id, p.order_id, p.status, p.amount, p.expected_amount, p.received_amount,
               p.method, p.source, p.customer_phone, p.mpesa_receipt, p.result_code,
               p.result_desc, p.reconciliation_status, p.failure_reason,
@@ -419,7 +466,39 @@ async function queryPaymentStatus(req, res) {
     );
     if (!result.rows.length) return handleError(res, 404, 'Payment not found');
 
-    return handleSuccess(res, 200, 'Payment status retrieved', result.rows[0]);
+    let payment = result.rows[0];
+    const ageMs = Date.now() - new Date(payment.created_at).getTime();
+
+    // Give the normal callback a short head start. If the payment is still
+    // pending after ~4 seconds, query Daraja directly so a successful payment
+    // does not sit on the customer's screen waiting for a delayed callback.
+    if (['initiated', 'pending'].includes(String(payment.status).toLowerCase()) &&
+        payment.checkout_request_id && ageMs >= 4000) {
+      try {
+        const darajaResult = await queryDarajaStkStatus(checkoutRequestId);
+        await reconcileFromDarajaQuery(checkoutRequestId, darajaResult);
+
+        result = await pool.query(
+          `SELECT p.id, p.order_id, p.status, p.amount, p.expected_amount, p.received_amount,
+                  p.method, p.source, p.customer_phone, p.mpesa_receipt, p.result_code,
+                  p.result_desc, p.reconciliation_status, p.failure_reason,
+                  p.checkout_request_id, p.created_at, p.updated_at, p.completed_at,
+                  o.order_number, o.total_amount, o.amount_paid AS order_amount_paid,
+                  o.payment_status AS order_payment_status, o.payment_state AS order_payment_state,
+                  GREATEST(COALESCE(o.total_amount,0)-COALESCE(o.amount_paid,0),0)::numeric(12,2) AS order_balance_due
+           FROM payments p LEFT JOIN orders o ON o.id=p.order_id
+           WHERE p.checkout_request_id=$1 ORDER BY p.id DESC LIMIT 1`,
+          [checkoutRequestId]
+        );
+        payment = result.rows[0] || payment;
+      } catch (queryError) {
+        // The callback path may still complete the payment; do not turn a
+        // temporary Daraja query failure into a customer-visible payment failure.
+        console.warn('Daraja STK status fallback failed:', queryError.message);
+      }
+    }
+
+    return handleSuccess(res, 200, 'Payment status retrieved', payment);
   } catch (error) {
     return handleError(res, 500, 'Failed to query payment status', error);
   }
