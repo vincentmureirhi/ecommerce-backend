@@ -8,24 +8,16 @@ const {
 } = require('../middleware/rateLimitMiddleware');
 const legacyPaymentController = require('../controllers/paymentController');
 const mpesaStkController = require('../controllers/mpesaStkController');
-const mpesaConfirmationController = require('../controllers/mpesaConfirmationController');
+const mpesaConfirmationController = require('../controllers/mpesaConfirmationControllerV2');
 
 const router = express.Router();
 
 // Public / storefront-facing M-Pesa endpoints.
-// STK initiation stays on the configurable controller; confirmation and
-// recovery use the hardened confirmation controller with explicit SQL types.
-router.post(
-  '/stk-push',
-  paymentStkRateLimiter,
-  mpesaStkController.initiateSTKPush
-);
+// STK initiation stays on the existing controller; confirmation and recovery
+// use a dedicated type-safe settlement controller.
+router.post('/stk-push', paymentStkRateLimiter, mpesaStkController.initiateSTKPush);
 router.post('/callback', mpesaConfirmationController.mpesaCallback);
-router.get(
-  '/status/:checkoutRequestId',
-  paymentStatusRateLimiter,
-  mpesaConfirmationController.queryPaymentStatus
-);
+router.get('/status/:checkoutRequestId', paymentStatusRateLimiter, mpesaConfirmationController.queryPaymentStatus);
 
 // Admin routes keep the existing reconciliation/reporting implementation.
 router.get('/summary', verifyToken, requireAdmin, legacyPaymentController.getPaymentSummary);
