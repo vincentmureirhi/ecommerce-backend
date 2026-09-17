@@ -125,11 +125,18 @@ function broadcastPaymentFailed(paymentData) {
 
 function broadcastPaymentCompleted(paymentData) {
   if (io) {
-    io.to('payments-room').emit('payment:completed', {
+    const event = {
       type: 'payment_completed',
       timestamp: new Date(),
       data: paymentData,
-    });
+    };
+
+    io.to('payments-room').emit('payment:completed', event);
+
+    // The Orders screen subscribes to dashboard updates. Mirror the
+    // payment completion there so its existing live refresh picks up the
+    // newly-settled order immediately instead of waiting for polling.
+    io.to('dashboard-room').emit('dashboard:updated', event);
 
     // Send success notification
     broadcastAlert({
