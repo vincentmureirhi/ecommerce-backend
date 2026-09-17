@@ -53,7 +53,20 @@ async function darajaStatus(checkoutRequestId) {
 }
 
 async function getPayment(client, checkoutRequestId, lock = false) {
-  const lockSql = lock ? 'FOR UPDATE' : '';
+  // PostgreSQL cannot apply FOR UPDATE to the nullable side of a LEFT JOIN.
+  // Lock the payment row by itself first, then load the related order without a row lock.
+  let idQuery = `
+    SELECT id
+    FROM payments
+    WHERE checkout_request_id = $1::text
+    ORDER BY id DESC
+    LIMIT 1
+  `;
+  if (lock) idQuery += ' FOR UPDATE';
+
+  const idResult = await client.query(idQuery, [checkoutRequestId]);
+  if (!idResult.rows.length) return null;
+
   const result = await client.query(
     `
       SELECT
@@ -66,13 +79,12 @@ async function getPayment(client, checkoutRequestId, lock = false) {
         o.order_status, o.customer_phone AS order_customer_phone
       FROM payments p
       LEFT JOIN orders o ON o.id = p.order_id
-      WHERE p.checkout_request_id = $1::text
-      ORDER BY p.id DESC
+      WHERE p.id = $1::integer
       LIMIT 1
-      ${lockSql}
     `,
-    [checkoutRequestId]
+    [idResult.rows[0].id]
   );
+
   return result.rows[0] || null;
 }
 
@@ -149,22 +161,14 @@ async function settleOrder(client, orderId) {
     }
   } else {
     const state = fullyPaid ? 'paid' : paid.gt(0) ? 'partial' : 'unpaid';
-    if (state === 'paid') {
-      await client.query(
-        `UPDATE orders SET amount_paid = $1::numeric, payment_state = 'paid', updated_at = CURRENT_TIMESTAMP WHERE id = $2::integer`,
-        [paid.toFixed(2), orderId]
-      );
-    } else if (state === 'partial') {
-      await client.query(
-        `UPDATE orders SET amount_paid = $1::numeric, payment_state = 'partial', updated_at = CURRENT_TIMESTAMP WHERE id = $2::integer`,
-        [paid.toFixed(2), orderId]
-      );
-    } else {
-      await client.query(
-        `UPDATE orders SET amount_paid = $1::numeric, payment_state = 'unpaid', updated_at = CURRENT_TIMESTAMP WHERE id = $2::integer`,
-        [paid.toFixed(2), orderId]
-      );
-    }
+    await client.query(
+      `UPDATE orders
+       SET amount_paid = $1::numeric,
+           payment_state = $2::text,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3::integer`,
+      [paid.toFixed(2), state, orderId]
+    );
   }
 
   return { ...order, amount_paid: paid.toFixed(2), fullyPaid };
@@ -271,7 +275,7 @@ async function queryPaymentStatus(req, res) {
             const next = failedStatus(darajaResult.ResultDesc);
             await client.query(
               `UPDATE payments
-               SET status = $1,
+               SET status = $1::text,
                    result_code = $2,
                    result_desc = $3::text,
                    reconciliation_status = 'manual_review',
@@ -346,7 +350,7 @@ async function mpesaCallback(req, res) {
     const next = failedStatus(result.ResultDesc);
     await client.query(
       `UPDATE payments
-       SET status = $1,
+       SET status = $1::text,
            result_code = $2,
            result_desc = $3::text,
            callback_data = $4::jsonb,
