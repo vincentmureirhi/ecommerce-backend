@@ -1,5 +1,5 @@
 -- ============================================================
---  XPOSE DISTRIBUTORS — Safe catch-up migration
+--  XPOSE BEAUTY SHOP LIMITED — Safe catch-up migration
 --  Run this once in psql to fix the 500 error on order placement.
 --  All statements use IF NOT EXISTS / IF EXISTS so it is safe
 --  to run multiple times.
