@@ -2998,7 +2998,7 @@ const getOrderForPrint = async (req, res) => {
       <body>
         <div class="sheet">
           <div class="center">
-            <div class="title">XPOSE DISTRIBUTORS</div>
+            <div class="title">XPOSE BEAUTY SHOP LIMITED</div>
             <div class="sub">${orderSheetSubtitle}</div>
           </div>
 
@@ -3116,7 +3116,7 @@ const getOrderForPrint = async (req, res) => {
 
           <div class="footer">
             <div>Thank you for shopping with us!</div>
-            <div>XPOSE DISTRIBUTORS</div>
+            <div>XPOSE BEAUTY SHOP LIMITED</div>
             <div>${formatBusinessDateTime(new Date())}</div>
           </div>
         </div>
