@@ -10,6 +10,6 @@ VALUES (
   1,
   '## Terms & Conditions
 
-Welcome to XPOSE Distributors. These terms are managed from the admin panel.'
+Welcome to XPOSE Beauty Shop Limited. These terms are managed from the admin panel.'
 )
 ON CONFLICT (id) DO NOTHING;
