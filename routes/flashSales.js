@@ -17,13 +17,21 @@ const {
   getActiveFlashSaleProducts,
 } = require('../controllers/flashSaleController');
 
+function noStoreFlashSaleCache(req, res, next) {
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0");
+  res.set("Pragma", "no-cache");
+  res.set("Expires", "0");
+  res.set("Surrogate-Control", "no-store");
+  next();
+}
+
 // ── Public routes (no auth — used by customer storefront) ─────────────────────
 // Returns active sales with products already embedded — one request, zero auth.
-router.get('/active-summary', getActiveFlashSaleSummary);
-router.get('/active', getActiveFlashSales);
-router.get('/public', getPublicFlashSaleFeed);
+router.get('/active-summary', noStoreFlashSaleCache, getActiveFlashSaleSummary);
+router.get('/active', noStoreFlashSaleCache, getActiveFlashSales);
+router.get('/public', noStoreFlashSaleCache, getPublicFlashSaleFeed);
 // Returns products of a specific active sale (public — only works while sale is live)
-router.get('/:id/active-products', getActiveFlashSaleProducts);
+router.get('/:id/active-products', noStoreFlashSaleCache, getActiveFlashSaleProducts);
 
 // ── Admin routes ──────────────────────────────────────────────────────────────
 router.get('/', verifyToken, requireAdmin, getAllFlashSales);
