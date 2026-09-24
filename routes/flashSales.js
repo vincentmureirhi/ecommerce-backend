@@ -6,6 +6,7 @@ const { verifyToken, requireAdmin } = require('../middleware/authMiddleware');
 const {
   getAllFlashSales,
   getActiveFlashSales,
+  getActiveFlashSaleSummary,
   getPublicFlashSaleFeed,
   createFlashSale,
   updateFlashSale,
@@ -18,6 +19,7 @@ const {
 
 // ── Public routes (no auth — used by customer storefront) ─────────────────────
 // Returns active sales with products already embedded — one request, zero auth.
+router.get('/active-summary', getActiveFlashSaleSummary);
 router.get('/active', getActiveFlashSales);
 router.get('/public', getPublicFlashSaleFeed);
 // Returns products of a specific active sale (public — only works while sale is live)
