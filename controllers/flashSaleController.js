@@ -37,6 +37,81 @@ const getAllFlashSales = async (req, res) => {
 
 // GET ACTIVE FLASH SALES
 // Public storefront endpoint with embedded products
+// GET ACTIVE FLASH SALE SUMMARY
+// Fast public endpoint for storefront homepage hydration.
+// Returns only sale metadata and product ids/prices; the heavy product/stock payload
+// remains on /:id/active-products for pages that actually need it.
+const getActiveFlashSaleSummary = async (req, res) => {
+  try {
+    const result = await pool.query(
+      `
+      SELECT
+        fs.id,
+        fs.name,
+        fs.description,
+        fs.discount_type,
+        fs.discount_value,
+        fs.start_date,
+        fs.end_date,
+        fs.is_active,
+        fsp.product_id AS id_product,
+        CASE
+          WHEN fs.discount_type = 'percentage'
+            THEN ROUND((p.retail_price * (1 - fs.discount_value / 100.0))::numeric, 2)::FLOAT
+          ELSE GREATEST((p.retail_price - fs.discount_value)::numeric, 0)::FLOAT
+        END AS discounted_price
+      FROM flash_sales fs
+      JOIN flash_sale_products fsp
+        ON fsp.flash_sale_id = fs.id
+      JOIN products p
+        ON p.id = fsp.product_id
+      WHERE
+        fs.is_active = TRUE
+        AND fs.start_date <= NOW()
+        AND fs.end_date >= NOW()
+        AND COALESCE(p.is_active, TRUE) = TRUE
+      ORDER BY fs.end_date ASC, fsp.created_at DESC
+      `
+    );
+
+    const sales = new Map();
+
+    for (const row of result.rows) {
+      if (!sales.has(row.id)) {
+        sales.set(row.id, {
+          id: row.id,
+          name: row.name,
+          description: row.description,
+          discount_type: row.discount_type,
+          discount_value: row.discount_value,
+          start_date: row.start_date,
+          end_date: row.end_date,
+          is_active: row.is_active,
+          product_count: 0,
+          products: [],
+        });
+      }
+
+      const sale = sales.get(row.id);
+      sale.products.push({
+        id: row.id_product,
+        discounted_price: row.discounted_price,
+      });
+      sale.product_count += 1;
+    }
+
+    return handleSuccess(
+      res,
+      200,
+      'Active flash sale summary retrieved successfully',
+      Array.from(sales.values())
+    );
+  } catch (err) {
+    console.error('getActiveFlashSaleSummary error:', err.message);
+    return handleError(res, 500, 'Failed to retrieve active flash sale summary', err);
+  }
+};
+
 const getActiveFlashSales = async (req, res) => {
   try {
     const result = await pool.query(`
@@ -1018,6 +1093,7 @@ const getActiveFlashSaleProducts = async (
 module.exports = {
   getAllFlashSales,
   getActiveFlashSales,
+  getActiveFlashSaleSummary,
   getPublicFlashSaleFeed,
   createFlashSale,
   updateFlashSale,
