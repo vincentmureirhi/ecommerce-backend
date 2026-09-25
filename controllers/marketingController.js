@@ -28,7 +28,6 @@ function normalizeSlug(value, fallback = 'CAMPAIGN') {
     .slice(0, 70) || fallback;
 }
 
-function normalizeDate(value) {
 function normalizeCollectionSlug(value) {
   const source = normalizeText(value);
   if (!source) return null;
@@ -39,6 +38,7 @@ function normalizeCollectionSlug(value) {
     .slice(0, 120) || null;
 }
 
+function normalizeDate(value) {
   if (!value) return null;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
