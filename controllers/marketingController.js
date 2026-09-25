@@ -111,7 +111,10 @@ const listPublicCampaigns = async (req, res) => {
       [limit]
     );
 
-    res.set('Cache-Control', 'public, max-age=30, stale-while-revalidate=120');
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    res.set('Surrogate-Control', 'no-store');
     return handleSuccess(res, 200, 'Public campaigns retrieved', result.rows);
   } catch (err) {
     console.error('listPublicCampaigns error:', err.message);
